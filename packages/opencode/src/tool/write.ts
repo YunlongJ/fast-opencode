@@ -76,6 +76,16 @@ export const WriteTool = Tool.define("write", {
       })
       FileTime.read(ctx.sessionID, filepath)
 
+      // 索引写入的文件内容到 MemoryContextEngine
+      try {
+        const { MemoryContextEngine } = await import("../session/engine/context");
+        const engine = MemoryContextEngine.getInstance();
+        await engine.init();
+        await engine.indexFile(filepath, params.content);
+      } catch (e) {
+        // 索引失败不应阻断工具执行
+      }
+
       let output = "Wrote file successfully."
       await LSP.touchFile(filepath, true)
       const diagnostics = await LSP.diagnostics()

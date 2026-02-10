@@ -13,6 +13,36 @@ export interface SymbolInfo {
 }
 
 /**
+ * 语言特定的 Tree-sitter 查询
+ */
+const QUERIES: Record<string, string> = {
+  typescript: `
+    (class_declaration name: (type_identifier) @class.name)
+    (function_declaration name: (identifier) @function.name)
+    (method_definition name: (property_identifier) @method.name)
+    (interface_declaration name: (type_identifier) @interface.name)
+    (variable_declarator name: (identifier) @variable.name)
+  `,
+  javascript: `
+    (class_declaration name: (identifier) @class.name)
+    (function_declaration name: (identifier) @function.name)
+    (method_definition name: (property_identifier) @method.name)
+    (variable_declarator name: (identifier) @variable.name)
+  `,
+  java: `
+    (class_declaration name: (identifier) @class.name)
+    (method_declaration name: (identifier) @method.name)
+    (interface_declaration name: (identifier) @interface.name)
+    (field_declaration (variable_declarator name: (identifier) @variable.name))
+  `,
+  python: `
+    (class_definition name: (identifier) @class.name)
+    (function_definition name: (identifier) @function.name)
+    (assignment left: (identifier) @variable.name)
+  `
+};
+
+/**
  * 基于 Tree-sitter 的 AST 符号提取器
  */
 export class ASTSymbolExtractor {
@@ -23,8 +53,9 @@ export class ASTSymbolExtractor {
    * @param parser 已初始化的 Parser 实例
    * @param lang 语言实例 (WASM)
    * @param sourceCode 源代码
+   * @param languageId 语言 ID (例如 'typescript', 'java')
    */
-  public static async extract(parser: Parser, lang: any, sourceCode: string): Promise<SymbolInfo[]> {
+  public static async extract(parser: Parser, lang: any, sourceCode: string, languageId: string = "typescript"): Promise<SymbolInfo[]> {
     parser.setLanguage(lang);
     const tree = parser.parse(sourceCode);
     if (!tree) {
@@ -33,14 +64,8 @@ export class ASTSymbolExtractor {
     }
     const symbols: SymbolInfo[] = [];
 
-    // 定义 Tree-sitter 查询语句 (以 TypeScript 为例)
-    // 实际生产中应根据不同语言加载不同的 query 配置文件
-    const queryStr = `
-      (class_declaration name: (type_identifier) @class.name)
-      (function_declaration name: (identifier) @function.name)
-      (method_definition name: (property_identifier) @method.name)
-      (interface_declaration name: (type_identifier) @interface.name)
-    `;
+    // 获取对应语言的查询语句
+    const queryStr = QUERIES[languageId] || QUERIES.typescript;
 
     try {
       const query = lang.query(queryStr);
@@ -49,8 +74,13 @@ export class ASTSymbolExtractor {
       for (const match of matches) {
         for (const capture of match.captures) {
           const node = capture.node;
-          const type = capture.name.split('.')[0] as SymbolInfo["type"];
+          const captureName = capture.name;
+          const type = captureName.split('.')[0] as SymbolInfo["type"];
           
+          // 避免重复索引同一个节点
+          const isDuplicate = symbols.some(s => s.name === node.text && s.startLine === node.startPosition.row);
+          if (isDuplicate) continue;
+
           symbols.push({
             name: node.text,
             type: type,
@@ -61,7 +91,7 @@ export class ASTSymbolExtractor {
         }
       }
     } catch (e) {
-      this.log.error("Query match failed", { error: e });
+      this.log.error("Query match failed", { languageId, error: e });
     }
 
     return symbols;

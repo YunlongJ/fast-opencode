@@ -90,11 +90,42 @@ export class StepEngine {
 
     let llmMessages = streamInput.messages
     const maxToolSteps = 25
+    const governor = new ContextGovernor();
+    let contextInjected = false; // 确保每个 User 消息仅注入一次上下文
 
     try {
       for (let toolStep = 0; toolStep < maxToolSteps; toolStep++) {
+        // --- 上下文治理 (Governance) ---
+        llmMessages = await governor.govern(llmMessages);
+      
       const stepExecutors: EngineToolExecutor[] = []
       const toolsForLLM = this.input.parallelEnabled ? this.deps.stripExecute(streamInput.tools) : streamInput.tools
+
+      // --- 极致上下文注入 (In-Memory Context Injection) ---
+      if (!contextInjected) {
+        const lastMessageIndex = llmMessages.length - 1;
+        const lastMessage = llmMessages[lastMessageIndex];
+        if (lastMessage && lastMessage.role === "user") {
+          const query = typeof lastMessage.content === "string" ? lastMessage.content : "";
+          if (query) {
+            const engine = MemoryContextEngine.getInstance();
+            await engine.init(); // 确保引擎已初始化
+            const relevantSnippets = await engine.search(query, 3);
+            contextInjected = true; // 标记已尝试注入，避免重复搜索
+            if (relevantSnippets.length > 0) {
+              const contextPrompt = `\n\n[Memory Context Engine]: 检索到相关代码片段，请参考：\n${relevantSnippets.join("\n---\n")}`;
+              if (typeof lastMessage.content === "string") {
+                const newLastMessage = {
+                  ...lastMessage,
+                  content: lastMessage.content + contextPrompt
+                };
+                llmMessages = [...llmMessages.slice(0, lastMessageIndex), newLastMessage];
+              }
+            }
+          }
+        }
+      }
+      // --------------------------------------------------
 
       const stream = await LLM.stream({
         ...streamInput,

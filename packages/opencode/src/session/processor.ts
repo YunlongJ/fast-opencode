@@ -52,6 +52,10 @@ export namespace SessionProcessor {
         // 初始化内存上下文引擎 (FlexSearch + Tree-sitter)
         const contextEngine = MemoryContextEngine.getInstance();
         await contextEngine.init();
+        // 触发工作区索引 (后台执行)
+        contextEngine.indexWorkspace().catch(err => {
+          log.error("Background workspace indexing failed", { error: err });
+        });
 
         const config = await Config.get()
         const shouldBreak = config.experimental?.continue_loop_on_deny !== true

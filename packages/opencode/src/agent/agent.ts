@@ -9,6 +9,7 @@ import { Auth } from "../auth"
 import { ProviderTransform } from "../provider/transform"
 
 import PROMPT_GENERATE from "./generate.txt"
+import PROMPT_BUILD from "./prompt/build.txt"
 import PROMPT_COMPACTION from "./prompt/compaction.txt"
 import PROMPT_EXPLORE from "./prompt/explore.txt"
 import PROMPT_SUMMARY from "./prompt/summary.txt"
@@ -75,6 +76,7 @@ export namespace Agent {
       build: {
         name: "build",
         description: "统一 Agent 核心。具备规划、搜索、分析与执行的完整能力。可根据上下文自动切换逻辑模式。",
+        prompt: PROMPT_BUILD,
         options: {},
         permission: PermissionNext.merge(
           defaults,

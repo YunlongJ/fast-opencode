@@ -231,6 +231,21 @@ export const ApplyPatchTool = Tool.define("apply_patch", {
       await Bus.publish(FileWatcher.Event.Updated, update)
     }
 
+    // 索引变更的文件内容到 MemoryContextEngine
+    try {
+      const { MemoryContextEngine } = await import("../session/engine/context");
+      const engine = MemoryContextEngine.getInstance();
+      await engine.init();
+      for (const change of fileChanges) {
+        if (change.type !== "delete") {
+          const target = change.movePath ?? change.filePath;
+          await engine.indexFile(target, change.newContent);
+        }
+      }
+    } catch (e) {
+      // 索引失败不应阻断工具执行
+    }
+
     // Notify LSP of file changes and collect diagnostics
     for (const change of fileChanges) {
       if (change.type === "delete") continue
