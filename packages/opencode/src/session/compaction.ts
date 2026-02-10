@@ -99,12 +99,17 @@ export namespace SessionCompaction {
   async function summarize(text: string): Promise<string> {
     try {
       const agent = await Agent.get("compaction")
+      const model = agent.model ?? (await Provider.defaultModel())
       const result = await LLM.generate({
-        model: agent.model,
+        model,
         messages: [
-          { role: "system", content: "You are a tool output summarizer. Summarize the following tool output concisely, preserving key findings, errors, and file paths. Keep it under 200 words." },
-          { role: "user", content: text }
-        ]
+          {
+            role: "system",
+            content:
+              "You are a tool output summarizer. Summarize the following tool output concisely, preserving key findings, errors, and file paths. Keep it under 200 words.",
+          },
+          { role: "user", content: text },
+        ],
       })
       return result.text
     } catch (e) {

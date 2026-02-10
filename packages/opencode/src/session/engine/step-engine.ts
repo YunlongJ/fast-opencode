@@ -14,11 +14,13 @@ import type { ModelMessage, Tool } from "ai"
 import type { ToolBlackboard } from "./tool-blackboard"
 import type { StreamRenderer } from "./stream-renderer"
 import type { ToolExecutor as EngineToolExecutor, ToolOrchestrator } from "./tool-orchestrator"
-import { planFromToolExecutors, Plan, PlanNode } from "./plan-dsl"
+import { planFromToolExecutors, type Plan, type PlanNode } from "./plan-dsl"
 import { RecoveryAgent } from "./recovery-agent"
 import { PermissionNext } from "@/permission/next"
 import { Question } from "@/question"
 import { Truncate } from "@/tool/truncation"
+import { MemoryContextEngine } from "./context"
+import { ContextGovernor } from "./governor"
 
 type Ref<T> = { value: T }
 
@@ -88,9 +90,39 @@ export class StepEngine {
 
     let llmMessages = streamInput.messages
     const maxToolSteps = 25
-    for (let toolStep = 0; toolStep < maxToolSteps; toolStep++) {
+    const governor = new ContextGovernor();
+
+    try {
+      for (let toolStep = 0; toolStep < maxToolSteps; toolStep++) {
+        // --- 上下文治理 (Governance) ---
+        llmMessages = await governor.govern(llmMessages);
+      
       const stepExecutors: EngineToolExecutor[] = []
       const toolsForLLM = this.input.parallelEnabled ? this.deps.stripExecute(streamInput.tools) : streamInput.tools
+
+      // --- 极致上下文注入 (In-Memory Context Injection) ---
+      const lastMessageIndex = llmMessages.length - 1;
+      const lastMessage = llmMessages[lastMessageIndex];
+      if (lastMessage && lastMessage.role === "user") {
+        const query = typeof lastMessage.content === "string" ? lastMessage.content : "";
+        if (query) {
+          const contextEngine = MemoryContextEngine.getInstance();
+          const relevantSnippets = await contextEngine.search(query, 3);
+          if (relevantSnippets.length > 0) {
+            const contextPrompt = `\n\n[Memory Context Engine]: 检索到相关代码片段，请参考：\n${relevantSnippets.join("\n---\n")}`;
+            // 创建新消息对象以避免污染原始消息引用
+            if (typeof lastMessage.content === "string") {
+              const newLastMessage = {
+                ...lastMessage,
+                content: lastMessage.content + contextPrompt
+              };
+              llmMessages = [...llmMessages.slice(0, lastMessageIndex), newLastMessage];
+            }
+          }
+        }
+      }
+      // --------------------------------------------------
+
       const stream = await LLM.stream({
         ...streamInput,
         messages: llmMessages,
@@ -334,8 +366,6 @@ export class StepEngine {
               currentText = undefined
             }
             break
-          case "response-metadata":
-            break
           case "finish":
             break
           default:
@@ -350,9 +380,9 @@ export class StepEngine {
         llmMessages = [...llmMessages, ...responseMessages]
       }
 
+      if (stepExecutors.length === 0) break
       if (!this.input.parallelEnabled) break
       if (needsCompaction) break
-      if (stepExecutors.length === 0) break
 
       const plan = planFromToolExecutors(stepExecutors)
       metrics.plannedNodes += plan.nodes.length
@@ -424,7 +454,7 @@ export class StepEngine {
             if (recovery.type === "retry") {
               node.status = "pending"
               node.retryCount++
-              continue // Will be picked up in next iteration
+              continue // Will be picked up in next iteration, NOT added to executedIds
             } else if (recovery.type === "add-nodes") {
               // Add new nodes to plan and create executors for them
               for (const newNode of recovery.nodes) {
@@ -462,8 +492,8 @@ export class StepEngine {
 
           let toolOutput = r.ok ? (r.output?.output ?? "") : (r.error ?? "Tool execution failed")
           
-          // Apply truncation if needed
-          if (r.ok && toolOutput.length > Truncate.MAX_BYTES) {
+          // Apply truncation if needed (both for success and error outputs to prevent token overflow/leaks)
+          if (toolOutput.length > Truncate.MAX_BYTES) {
             const truncated = await Truncate.output(toolOutput, {}, this.input.agent)
             toolOutput = truncated.content
           }
@@ -509,6 +539,16 @@ export class StepEngine {
           }),
         },
       ]
+      
+      // 检查是否所有计划中的节点都已执行完毕
+      const allDone = plan.nodes.every(n => n.status === "completed" || n.status === "error" || n.status === "skipped")
+      if (allDone) break
+    }
+  } finally {
+      // 避免 Reasoning Map 内存泄漏，确保清理所有未完成的推理节点
+      for (const id in reasoningMap) {
+        delete reasoningMap[id]
+      }
     }
 
     await this.deps.renderer.flushAll()

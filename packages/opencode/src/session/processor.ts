@@ -16,6 +16,7 @@ import { StreamRenderer } from "./engine/stream-renderer"
 import { ToolBlackboard } from "./engine/tool-blackboard"
 import { StepEngine } from "./engine/step-engine"
 import { ToolOrchestrator, createResourceLockManager as createEngineResourceLockManager, createToolExecutor as createEngineToolExecutor } from "./engine/tool-orchestrator"
+import { MemoryContextEngine } from "./engine/context"
 
 export namespace SessionProcessor {
   const log = Log.create({ service: "session.processor" })
@@ -47,6 +48,11 @@ export namespace SessionProcessor {
         log.info("process")
         needsCompaction = false
         const blackboard = new ToolBlackboard()
+
+        // 初始化内存上下文引擎 (FlexSearch + Tree-sitter)
+        const contextEngine = MemoryContextEngine.getInstance();
+        await contextEngine.init();
+
         const config = await Config.get()
         const shouldBreak = config.experimental?.continue_loop_on_deny !== true
         const parallelEnabled = config.experimental?.parallel_execution !== false
@@ -120,8 +126,14 @@ export namespace SessionProcessor {
           )
         }
         const getResponseMessages = async (result: any): Promise<ModelMessage[]> => {
-          const resp = await (result?.response?.then ? result.response : Promise.resolve(result?.response))
-          return resp?.messages ?? []
+          if (!result) return []
+          try {
+            const resp = await (result?.response?.then ? result.response : Promise.resolve(result?.response))
+            return resp?.messages ?? []
+          } catch (e) {
+            log.error("Failed to get response messages from stream result", { error: e })
+            return []
+          }
         }
         let metrics = {
           ttftMs: -1,

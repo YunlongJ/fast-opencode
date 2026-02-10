@@ -498,8 +498,8 @@ export class ToolOrchestrator {
             status: "completed",
             input: executor.input,
             output: result.output?.output ?? "",
-            title: result.output?.title,
-            metadata: result.output?.metadata,
+            title: result.output?.title ?? executor.toolName,
+            metadata: result.output?.metadata ?? {},
             attachments: result.output?.attachments,
             time: { start: Date.now(), end: Date.now() },
           }
@@ -747,7 +747,7 @@ async function executeTool(args: {
 
   try {
     const result = await executeFn(executor.input, { toolCallId: executor.callId, abortSignal: executor.abort, messages: [] })
-    const attachments = result.attachments?.map((attachment) => ({
+    const attachments = result.attachments?.map((attachment: any) => ({
       ...attachment,
       id: Identifier.ascending("part"),
       messageID: args.input.assistantMessage.id,
@@ -763,9 +763,9 @@ async function executeTool(args: {
       state: {
         status: "completed",
         input: executor.input,
-        output: result.output,
-        title: result.title,
-        metadata: result.metadata,
+        output: result.output ?? "",
+        title: result.title ?? executor.toolName,
+        metadata: result.metadata ?? {},
         attachments,
         time: { start, end: Date.now() },
       },
@@ -775,8 +775,8 @@ async function executeTool(args: {
       callID: executor.callId,
       tool: executor.toolName,
       input: executor.input,
-      output: result.output,
-      title: result.title,
+      output: result.output ?? "",
+      title: result.title ?? executor.toolName,
       metadata: result.metadata ?? {},
       attachments: attachments ?? [],
     })
@@ -786,7 +786,7 @@ async function executeTool(args: {
       toolCallId: executor.callId,
       toolName: executor.toolName,
       input: executor.input,
-      output: { output: result.output, title: result.title, metadata: result.metadata ?? {}, attachments },
+      output: { output: result.output ?? "", title: result.title ?? executor.toolName, metadata: result.metadata ?? {}, attachments },
     }
   } catch (error) {
     const errText = error instanceof Error ? error.message : String(error)

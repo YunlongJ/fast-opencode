@@ -1,5 +1,5 @@
-import { ToolExecutionResult } from "./tool-orchestrator"
-import { PlanNode } from "./plan-dsl"
+import type { ToolExecutionResult } from "./tool-orchestrator"
+import type { PlanNode } from "./plan-dsl"
 import { Identifier } from "@/id/id"
 
 export type RecoveryAction = {
@@ -27,7 +27,7 @@ export class RecoveryAgent {
         return {
           type: "add-nodes",
           nodes: [{
-            id: Identifier.ascending("recovery"),
+            id: Identifier.ascending("tool"),
             toolName: "glob",
             args: { pattern: `**/${pathStr.split(/[/\\]/).pop()}` },
             dependsOn: [],
