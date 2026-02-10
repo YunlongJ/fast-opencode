@@ -24,7 +24,6 @@ import MAX_STEPS from "../session/prompt/max-steps.txt"
 import { defer } from "../util/defer"
 import { clone } from "remeda"
 import { ToolRegistry } from "../tool/registry"
-import { SessionChecker } from "./checker"
 import { LSP } from "../lsp"
 import { ReadTool } from "../tool/read"
 import { ListTool } from "../tool/ls"
@@ -472,10 +471,6 @@ export namespace SessionPrompt {
         currentSessionID = s.parentID
       }
 
-      if (!effectivePrompt) {
-        effectivePrompt = SessionChecker.getEffectivePrompt(sessionID, lastUser.agent)
-      }
-
       if (effectivePrompt) {
         agent = { ...agent, prompt: effectivePrompt }
       }
@@ -584,17 +579,6 @@ export namespace SessionPrompt {
         tools,
         model,
       })
-      if (result === "continue" || result === "stop") {
-        SessionChecker.check({
-          sessionID,
-          agent: lastUser.agent,
-          messages: await Session.messages({ sessionID }),
-          model,
-          currentPrompt: [...systemPrompts, agent.prompt ?? ""].join("\n\n"),
-          agentPrompt: agent.prompt,
-          abort,
-        }).catch(() => {})
-      }
       if (result === "stop") break
       if (result === "compact") {
         await SessionCompaction.create({

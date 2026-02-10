@@ -90,38 +90,11 @@ export class StepEngine {
 
     let llmMessages = streamInput.messages
     const maxToolSteps = 25
-    const governor = new ContextGovernor();
 
     try {
       for (let toolStep = 0; toolStep < maxToolSteps; toolStep++) {
-        // --- 上下文治理 (Governance) ---
-        llmMessages = await governor.govern(llmMessages);
-      
       const stepExecutors: EngineToolExecutor[] = []
       const toolsForLLM = this.input.parallelEnabled ? this.deps.stripExecute(streamInput.tools) : streamInput.tools
-
-      // --- 极致上下文注入 (In-Memory Context Injection) ---
-      const lastMessageIndex = llmMessages.length - 1;
-      const lastMessage = llmMessages[lastMessageIndex];
-      if (lastMessage && lastMessage.role === "user") {
-        const query = typeof lastMessage.content === "string" ? lastMessage.content : "";
-        if (query) {
-          const contextEngine = MemoryContextEngine.getInstance();
-          const relevantSnippets = await contextEngine.search(query, 3);
-          if (relevantSnippets.length > 0) {
-            const contextPrompt = `\n\n[Memory Context Engine]: 检索到相关代码片段，请参考：\n${relevantSnippets.join("\n---\n")}`;
-            // 创建新消息对象以避免污染原始消息引用
-            if (typeof lastMessage.content === "string") {
-              const newLastMessage = {
-                ...lastMessage,
-                content: lastMessage.content + contextPrompt
-              };
-              llmMessages = [...llmMessages.slice(0, lastMessageIndex), newLastMessage];
-            }
-          }
-        }
-      }
-      // --------------------------------------------------
 
       const stream = await LLM.stream({
         ...streamInput,
