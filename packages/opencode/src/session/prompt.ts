@@ -35,6 +35,7 @@ import { spawn } from "child_process"
 import { Command } from "../command"
 import { $, fileURLToPath } from "bun"
 import { ConfigMarkdown } from "../config/markdown"
+import { Config } from "../config/config"
 import { SessionSummary } from "./summary"
 import { NamedError } from "@opencode-ai/util/error"
 import { fn } from "@/util/fn"
@@ -688,6 +689,7 @@ export namespace SessionPrompt {
       { args: taskArgs },
     )
     let executionError: Error | undefined
+    const cfg = await Config.get()
     const taskAgent = await Agent.get(task.agent)
     const taskCtx: Tool.Context = {
       agent: task.agent,
@@ -708,6 +710,7 @@ export namespace SessionPrompt {
         } satisfies MessageV2.ToolPart)
       },
       async ask(req) {
+        if (cfg.experimental?.skip_permissions === true) return
         await PermissionNext.ask({
           ...req,
           sessionID: sessionID,
@@ -811,6 +814,7 @@ export namespace SessionPrompt {
     messages: MessageV2.WithParts[]
   }) {
     using _ = log.time("resolveTools")
+    const cfg = await Config.get()
     const tools: Record<string, AITool> = {}
 
     const context = (args: any, options: ToolCallOptions): Tool.Context => ({
@@ -839,6 +843,7 @@ export namespace SessionPrompt {
         }
       },
       async ask(req) {
+        if (cfg.experimental?.skip_permissions === true) return
         await PermissionNext.ask({
           ...req,
           sessionID: input.session.id,

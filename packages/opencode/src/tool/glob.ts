@@ -8,6 +8,7 @@ import { assertExternalDirectory } from "./external-directory"
 
 // Concurrency limit for stat calls to avoid OS overhead
 const STAT_CONCURRENCY = 100
+const STAT_THRESHOLD = 200
 
 export const GlobTool = Tool.define("glob", {
   description: DESCRIPTION,
@@ -63,47 +64,25 @@ export const GlobTool = Tool.define("glob", {
     // We only stat if it's a reasonable amount, or we take the most relevant ones.
     // However, the user said "no limits", so we'll process all, but with batching.
     const baseDir = Instance.directory
-    const fileInfos: { path: string; mtime: number }[] = []
     
     // Optimization: Pre-calculate constants
     const searchIsBase = search === baseDir
-
-    const processBatch = async (batch: string[]) => {
-      return Promise.all(
-        batch.map(async (file) => {
-          const full = path.resolve(search, file)
-          const rel = searchIsBase ? file : path.relative(baseDir, full)
-          try {
-            const stats = await Bun.file(full).stat()
-            return { path: rel, mtime: stats.mtime.getTime() }
-          } catch {
-            return { path: rel, mtime: 0 }
-          }
-        })
-      )
+    const toRel = (file: string) => {
+      const full = path.resolve(search, file)
+      return searchIsBase ? file : path.relative(baseDir, full)
     }
-
-    // Run stats in controlled batches
-    for (let i = 0; i < results.length; i += STAT_CONCURRENCY) {
-      const batch = results.slice(i, i + STAT_CONCURRENCY)
-      const batchResults = await processBatch(batch)
-      fileInfos.push(...batchResults)
-    }
-
-    // 3. Sort by mtime descending
-    fileInfos.sort((a, b) => b.mtime - a.mtime)
 
     // 4. Smart Output Construction
     const output = []
-    const total = fileInfos.length
+    const total = results.length
     
     // If results are massive, we provide a structured summary to keep it "usable"
     // but we don't truncate unless it's absolutely necessary for token limits (> 1000)
     const SOFT_LIMIT = 500
-    const displayedFiles = fileInfos.slice(0, SOFT_LIMIT)
+    const displayedFiles = results.slice(0, SOFT_LIMIT).map((f) => toRel(f))
 
     if (total > SOFT_LIMIT) {
-      output.push(`Found ${total} matches. Showing the ${SOFT_LIMIT} most recently modified files:`)
+      output.push(`Found ${total} matches. Showing the first ${SOFT_LIMIT} files:`)
       output.push("")
     } else {
       output.push(`Found ${total} matches:`)
@@ -112,8 +91,8 @@ export const GlobTool = Tool.define("glob", {
 
     // Grouping logic for the distribution summary
     const dirGroups = new Map<string, number>()
-    fileInfos.forEach(f => {
-      const dir = f.path.split(/[\\\/]/)[0] || "."
+    displayedFiles.forEach((p) => {
+      const dir = p.split(/[\\\/]/)[0] || "."
       dirGroups.set(dir, (dirGroups.get(dir) || 0) + 1)
     })
 
@@ -127,7 +106,7 @@ export const GlobTool = Tool.define("glob", {
       output.push("")
     }
 
-    output.push(...displayedFiles.map(f => f.path))
+    output.push(...displayedFiles)
 
     if (total > SOFT_LIMIT) {
       output.push("")

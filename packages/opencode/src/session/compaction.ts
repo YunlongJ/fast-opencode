@@ -5,6 +5,7 @@ import { Identifier } from "../id/id"
 import { Instance } from "../project/instance"
 import { Provider } from "../provider/provider"
 import { MessageV2 } from "./message-v2"
+import { LLM } from "./llm"
 import z from "zod"
 import { SessionPrompt } from "./prompt"
 import { Token } from "../util/token"
@@ -81,11 +82,34 @@ export namespace SessionCompaction {
     if (pruned > PRUNE_MINIMUM) {
       for (const part of toPrune) {
         if (part.state.status === "completed") {
+          // Smart Compression: if output is large, summarize it instead of just marking compacted
+          const output = part.state.output
+          if (output.length > 5000) {
+             const summary = await summarize(output)
+             part.state.output = `[Summarized Output]: ${summary}`
+          }
           part.state.time.compacted = Date.now()
           await Session.updatePart(part)
         }
       }
       log.info("pruned", { count: toPrune.length })
+    }
+  }
+
+  async function summarize(text: string): Promise<string> {
+    try {
+      const agent = await Agent.get("compaction")
+      const result = await LLM.generate({
+        model: agent.model,
+        messages: [
+          { role: "system", content: "You are a tool output summarizer. Summarize the following tool output concisely, preserving key findings, errors, and file paths. Keep it under 200 words." },
+          { role: "user", content: text }
+        ]
+      })
+      return result.text
+    } catch (e) {
+      log.error("summarization failed", { error: e })
+      return text.slice(0, 1000) + "... (summary failed)"
     }
   }
 

@@ -1118,6 +1118,10 @@ export namespace Config {
         .object({
           disable_paste_summary: z.boolean().optional(),
           batch_tool: z.boolean().optional().describe("Enable the batch tool"),
+          skip_permissions: z
+            .boolean()
+            .optional()
+            .describe("Skip all permission prompts for maximum speed (unsafe)"),
           openTelemetry: z
             .boolean()
             .optional()
@@ -1142,7 +1146,7 @@ export namespace Config {
             .int()
             .positive()
             .optional()
-            .describe("Maximum number of tools to execute in parallel (default: 10)"),
+            .describe("Maximum number of tools to execute in parallel (default: 16)"),
         })
         .optional(),
       checker: z
