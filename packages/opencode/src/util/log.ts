@@ -33,7 +33,7 @@ export namespace Log {
   /** 
    * 默认级别设为 silent，直到 init 被调用
    */
-  export let Default: PinoLogger = pino({ level: "silent" })
+  let rootLogger: PinoLogger = pino({ level: "silent" })
   let rootDestination: any | undefined
 
   export interface Options {
@@ -99,7 +99,7 @@ export namespace Log {
     }
 
     // 创建全局 Logger，使用 multistream 确保多路输出
-    Default = pino(
+    rootLogger = pino(
       {
         base: (process.env.NODE_ENV === "production" || !process.env.DEV) ? { pid: process.pid, hostname: os.hostname() } : undefined,
         timestamp: pino.stdTimeFunctions.isoTime,
@@ -209,25 +209,17 @@ export namespace Log {
     }
   }
 
-  type Logger = PinoLogger & {
+  export type Logger = PinoLogger & {
     time: (msg: string, metadata?: any) => { stop: () => void } & Disposable
     clone: () => Logger
     tag: (key: string, value: any) => Logger
+    error: { (msg: string, obj?: any): void } & PinoLogger['error']
+    warn: { (msg: string, obj?: any): void } & PinoLogger['warn']
+    info: { (msg: string, obj?: any): void } & PinoLogger['info']
+    debug: { (msg: string, obj?: any): void } & PinoLogger['debug']
   }
 
-  /** 兼容旧的 create 接口，但直接返回 Pino child logger */
-  export function create(tags?: Record<string, any>): Logger {
-    let currentParent: PinoLogger | undefined
-    let cachedChild: any
-
-    const getLogger = () => {
-      if (Default !== currentParent) {
-        currentParent = Default
-        cachedChild = currentParent.child(tags || {})
-      }
-      return cachedChild
-    }
-
+  function wrap(getLogger: () => PinoLogger, tags?: Record<string, any>): Logger {
     const time = (msg: string, metadata?: any) => {
       const start = performance.now()
       const stop = () => {
@@ -241,26 +233,54 @@ export namespace Log {
       }
     }
 
-    const clone = () => create(tags)
-    const tag = (key: string, value: any) => create({ ...tags, [key]: value })
+    const wrapMethod = (method: string) => {
+      return (msgOrObj: any, objOrMsg?: any, ...args: any[]) => {
+        const logger = getLogger()
+        if (typeof msgOrObj === "string") {
+          if (objOrMsg !== undefined) {
+            return (logger as any)[method](objOrMsg, msgOrObj, ...args)
+          }
+          return (logger as any)[method](msgOrObj, ...args)
+        }
+        return (logger as any)[method](msgOrObj, objOrMsg, ...args)
+      }
+    }
 
-    // 初始获取一次
-    const initialLogger = getLogger()
-
-    return new Proxy(initialLogger, {
+    return new Proxy({} as any, {
       get(target, prop, receiver) {
         if (prop === "time") return time
-        if (prop === "clone") return clone
-        if (prop === "tag") return tag
-        
+        if (prop === "clone") return () => wrap(getLogger, tags)
+        if (prop === "tag") return (key: string, value: any) => wrap(getLogger, { ...tags, [key]: value })
+        if (["error", "warn", "info", "debug"].includes(prop as string)) {
+          return wrapMethod(prop as string)
+        }
+
         const activeLogger = getLogger()
-        const val = activeLogger[prop]
+        const val = (activeLogger as any)[prop]
         if (typeof val === "function") {
           return val.bind(activeLogger)
         }
         return val
+      },
+    }) as Logger
+  }
+
+  export const Default: Logger = wrap(() => rootLogger)
+
+  /** 兼容旧的 create 接口，但直接返回 Pino child logger */
+  export function create(tags?: Record<string, any>): Logger {
+    let currentParent: PinoLogger | undefined
+    let cachedChild: PinoLogger
+
+    const getLogger = () => {
+      if (rootLogger !== currentParent) {
+        currentParent = rootLogger
+        cachedChild = currentParent.child(tags || {})
       }
-    })
+      return cachedChild!
+    }
+
+    return wrap(getLogger, tags)
   }
 
   /** 兼容旧的 time 接口 */

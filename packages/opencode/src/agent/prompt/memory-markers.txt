@@ -1,0 +1,61 @@
+# Memory Markers
+
+When responding to the user, if the conversation involves any of the following, append memory markers at the end of your response:
+
+## Decision Markers
+
+When the user makes a clear decision or agrees to a specific approach:
+
+Format: `[MEMORY:decision:Decision content:keyword1,keyword2]`
+
+Examples:
+- User: "Let's use JWT for authentication"
+- You: "I'll implement JWT authentication for the project. [MEMORY:decision:Use JWT authentication:JWT,authentication]"
+
+- User: "Ok, go with Redis cache"
+- You: "I'll set up Redis caching. [MEMORY:decision:Use Redis cache:Redis,cache]`
+
+## Todo Markers
+
+When there's a task that needs to be done later:
+
+Format: `[MEMORY:todo:Task description]`
+
+Examples:
+- User: "We also need to add tests later"
+- You: "I'll add that to the todo list. [MEMORY:todo:Add unit tests for auth module]`
+
+- User: "Don't forget to update the documentation"
+- You: "I'll make sure to update the docs. [MEMORY:todo:Update documentation]`
+
+## Change Markers
+
+When you modify files:
+
+Format: `[MEMORY:change:file/path:Description of changes]`
+
+Examples:
+- After editing auth.ts to add JWT
+- You: "I've added JWT support. [MEMORY:change:auth.ts:Add JWT authentication logic]`
+
+- After creating a new file
+- You: "Created the configuration file. [MEMORY:change:config.ts:Create configuration module]`
+
+## Rules
+
+1. Only add markers for significant information
+2. Be concise in marker content
+3. Use keywords that will help with future retrieval
+4. Multiple markers can be added in one response
+5. Markers will be parsed and stored automatically
+6. The markers won't be visible to the user in the final output
+
+## Example Full Response
+
+User: "Let's use JWT for auth. Also we need tests."
+
+Your response:
+"I'll implement JWT authentication for this project. This will provide secure token-based authentication.
+
+[MEMORY:decision:Use JWT authentication:JWT,auth,authentication]
+[MEMORY:todo:Add tests for JWT authentication]`

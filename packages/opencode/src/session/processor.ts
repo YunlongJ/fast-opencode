@@ -15,15 +15,28 @@ import { BackgroundTaskHandler, type WorkQueueIntegrationConfig } from "./work-q
 import { StreamRenderer } from "./engine/stream-renderer"
 import { ToolBlackboard } from "./engine/tool-blackboard"
 import { StepEngine } from "./engine/step-engine"
-import { ToolOrchestrator, createResourceLockManager as createEngineResourceLockManager, createToolExecutor as createEngineToolExecutor } from "./engine/tool-orchestrator"
+import {
+  ToolOrchestrator,
+  createResourceLockManager as createEngineResourceLockManager,
+  createToolExecutor as createEngineToolExecutor,
+} from "./engine/tool-orchestrator"
 import { MemoryContextEngine } from "./engine/context"
+import { CompactionService } from "./engine/compaction-service"
 
+/**
+ * SessionProcessor 负责处理会话的核心逻辑，包括工具调度、上下文管理和步骤执行。
+ * @responsibility 协调 LLM 流、工具执行、快照管理及上下文压缩。
+ */
 export namespace SessionProcessor {
   const log = Log.create({ service: "session.processor" })
 
   export type Info = Awaited<ReturnType<typeof create>>
   export type Result = Awaited<ReturnType<Info["process"]>>
 
+  /**
+   * 创建 SessionProcessor 实例
+   * @param input 初始化参数，包含会话 ID、模型信息等。
+   */
   export function create(input: {
     assistantMessage: MessageV2.Assistant
     sessionID: string
@@ -35,6 +48,8 @@ export namespace SessionProcessor {
     let blocked = false
     let attempt = 0
     let needsCompaction = false
+    let compactionAttemptCount = 0
+    const MAX_COMPACTION_ATTEMPTS = 3
     let backgroundHandler: BackgroundTaskHandler | null = null
 
     const result = {
@@ -44,18 +59,31 @@ export namespace SessionProcessor {
       partFromToolCall(toolCallID: string) {
         return toolcalls[toolCallID]
       },
-      async process(streamInput: LLM.StreamInput) {
-        log.info("process")
+      /**
+       * 执行会话处理循环
+       * @param streamInput LLM 输入流配置
+       * @returns 处理结果状态 ("continue" | "stop" | "compact")
+       * @throws 可能会抛出 LLM 调用或工具执行相关的异常，由内部 try-catch 统一处理并进行重试。
+       */
+      async process(
+        streamInput: LLM.StreamInput,
+      ): Promise<"continue" | "stop" | "compact" | { status: "error"; error: string; needsCompaction: boolean }> {
+        log.info("process", { sessionID: input.sessionID })
         needsCompaction = false
         const blackboard = new ToolBlackboard()
 
-        // 初始化内存上下文引擎 (FlexSearch + Tree-sitter)
-        const contextEngine = MemoryContextEngine.getInstance();
-        await contextEngine.init();
-        // 触发工作区索引 (后台执行)
-        contextEngine.indexWorkspace().catch(err => {
-          log.error({ err }, "Background workspace indexing failed");
-        });
+        // --- 极致上下文引擎初始化 (FlexSearch + Tree-sitter) ---
+        // @VertxThreadSafety: MemoryContextEngine 内部管理单例和并发索引
+        const contextEngine = MemoryContextEngine.getInstance()
+        try {
+          await contextEngine.init()
+          // 触发工作区索引 (后台异步执行，不阻塞主流程)
+          contextEngine.indexWorkspace().catch((err) => {
+            log.error({ err }, "Background workspace indexing failed")
+          })
+        } catch (err) {
+          log.error({ err }, "Failed to initialize MemoryContextEngine")
+        }
 
         const config = await Config.get()
         const shouldBreak = config.experimental?.continue_loop_on_deny !== true
@@ -69,6 +97,7 @@ export namespace SessionProcessor {
         let toolErrorCount = 0
         let toolDurationSum = 0
         let toolAdjustAt = Date.now()
+
         const limiter = (() => {
           let active = 0
           const queue: Array<() => void> = []
@@ -96,6 +125,7 @@ export namespace SessionProcessor {
           }
           return { run, notify }
         })()
+
         const onToolExecuted = (r: { durationMs: number; ok: boolean }) => {
           toolSampleCount++
           toolDurationSum += r.durationMs
@@ -121,6 +151,7 @@ export namespace SessionProcessor {
           toolDurationSum = 0
           toolAdjustAt = now
         }
+
         const stripExecute = (tools: Record<string, Tool>): Record<string, Tool> => {
           return Object.fromEntries(
             Object.entries(tools).map(([id, t]) => {
@@ -129,6 +160,7 @@ export namespace SessionProcessor {
             }),
           )
         }
+
         const getResponseMessages = async (result: any): Promise<ModelMessage[]> => {
           if (!result) return []
           try {
@@ -139,6 +171,7 @@ export namespace SessionProcessor {
             return []
           }
         }
+
         let metrics = {
           ttftMs: -1,
           toolCalls: 0,
@@ -149,15 +182,19 @@ export namespace SessionProcessor {
           reasoningDeltaCount: 0,
           plannedNodes: 0,
         }
+
         const renderer = new StreamRenderer({
           deltaThrottleMs: exp.delta_throttle_ms ?? exp.deltaThrottleMs,
         })
+
         const orchestrator = new ToolOrchestrator(
           { sessionID: input.sessionID, assistantMessage: input.assistantMessage, agent: agentInfo },
           streamInput.tools,
           { limiter, resourceLockManager, onToolExecuted: (r) => onToolExecuted(r) },
         )
+
         const snapshotRef = { value: snapshot as string | undefined }
+
         const stepEngine = new StepEngine(
           {
             sessionID: input.sessionID,
@@ -180,15 +217,70 @@ export namespace SessionProcessor {
             createToolExecutor: createEngineToolExecutor,
           },
         )
+
         const stopTimers = () => renderer.stopTimers()
+
         while (true) {
           try {
+            // --- 执行步骤引擎 ---
             const stepResult = await stepEngine.run(streamInput)
             blocked = stepResult.blocked
-            needsCompaction = stepResult.needsCompaction
             metrics = stepResult.metrics
             snapshot = snapshotRef.value
             stopTimers()
+
+            // --- 动态上下文治理评估 ---
+            // 根据当前 token 使用情况，评估是否需要执行压缩策略
+            const tokenCount =
+              input.assistantMessage.tokens.input +
+              input.assistantMessage.tokens.cache.read +
+              input.assistantMessage.tokens.output
+
+            const outputLimit = Math.min(input.model.limit.output, 4096)
+            const usableContext = input.model.limit.context - outputLimit
+
+            // 避免除以零
+            if (usableContext <= 0) {
+              log.warn("Invalid context limit", {
+                context: input.model.limit.context,
+                output: input.model.limit.output,
+              })
+            } else {
+              const usageRatio = tokenCount / usableContext
+
+              if (usageRatio > 0.95) {
+                compactionAttemptCount++
+
+                if (compactionAttemptCount > MAX_COMPACTION_ATTEMPTS) {
+                  log.error("Max compaction attempts reached, forcing continue", {
+                    sessionID: input.sessionID,
+                    attempts: compactionAttemptCount,
+                    usageRatio: usageRatio.toFixed(2),
+                  })
+                  // Force continue to break the infinite loop
+                  // This is a safety measure to prevent session lock
+                  needsCompaction = false
+                  return "continue"
+                }
+
+                log.warn("Full compaction triggered", {
+                  sessionID: input.sessionID,
+                  usageRatio: usageRatio.toFixed(2),
+                  attempt: compactionAttemptCount,
+                })
+                needsCompaction = true
+                return "compact"
+              } else if (usageRatio > 0.85) {
+                log.info("Pruning recommended", { usageRatio: usageRatio.toFixed(2) })
+                try {
+                  await CompactionService.prune({ sessionID: input.sessionID })
+                } catch (pruneError) {
+                  log.error("Pruning failed", { error: pruneError, sessionID: input.sessionID })
+                  // Continue even if pruning fails, don't block the session
+                }
+              }
+            }
+
             log.info("metrics", {
               sessionID: input.sessionID,
               ttftMs: metrics.ttftMs,
@@ -262,12 +354,12 @@ export namespace SessionProcessor {
           input.assistantMessage.time.completed = Date.now()
           await Session.updateMessage(input.assistantMessage)
           orchestrator.clear()
-          if (needsCompaction) return "compact"
           if (blocked) return "stop"
           if (input.assistantMessage.error) return "stop"
           return "continue"
         }
       },
+
       async enableBackgroundTasks(config?: WorkQueueIntegrationConfig) {
         if (backgroundHandler) {
           await backgroundHandler.stop()

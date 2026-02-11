@@ -238,7 +238,7 @@ async function isBinaryFile(filepath: string, fileSize: number, file: Bun.BunFil
 const FileParams = z.object({
   filePath: z.string().describe("The path to the file to read"),
   offset: z.coerce.number().int().nonnegative().default(0).describe("The line number to start reading from (0-based)"),
-  limit: z.coerce.number().int().positive().default(DEFAULT_READ_LIMIT).describe("The number of lines to read"),
+  limit: z.coerce.number().int().nonnegative().default(DEFAULT_READ_LIMIT).describe("The number of lines to read"),
 })
 
 export const ReadMultipleTool = Tool.define("read_multiple", {

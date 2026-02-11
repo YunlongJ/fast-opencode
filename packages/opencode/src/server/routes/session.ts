@@ -5,7 +5,7 @@ import z from "zod"
 import { Session } from "../../session"
 import { MessageV2 } from "../../session/message-v2"
 import { SessionPrompt } from "../../session/prompt"
-import { SessionCompaction } from "../../session/compaction"
+import { CompactionService } from "../../session/engine/compaction-service"
 import { SessionRevert } from "../../session/revert"
 import { SessionStatus } from "@/session/status"
 import { SessionSummary } from "@/session/summary"
@@ -530,7 +530,7 @@ export const SessionRoutes = lazy(() =>
             break
           }
         }
-        await SessionCompaction.create({
+        await CompactionService.create({
           sessionID,
           agent: currentAgent,
           model: {
