@@ -6,6 +6,7 @@
 
 import { Index } from "flexsearch";
 import { Parser, Language } from "web-tree-sitter";
+import path from "path";
 import { Log } from "@/util/log";
 import { ASTSymbolExtractor, type SymbolInfo } from "./ast-extractor";
 import { SemanticEngine } from "./semantic";
@@ -28,6 +29,7 @@ export class MemoryContextEngine {
   // 缓存与治理
   private symbolCache: Map<string, SymbolInfo[]> = new Map();
   private contentCache: Map<string, string> = new Map();
+  private symbolMap: Map<string, { filePath: string; symbol: SymbolInfo }> = new Map(); // 全局符号映射
   private readonly MAX_CACHE_FILES = 500; 
   
   private initialized = false;
@@ -40,7 +42,7 @@ export class MemoryContextEngine {
       resolution: 9,
       cache: true,
     });
-    // 初始化 Voy 语义引擎
+    // 初始化 Vectra 语义引擎
     this.semanticEngine = new SemanticEngine();
   }
 
@@ -59,7 +61,13 @@ export class MemoryContextEngine {
    * @param wasmPath 语言 WASM 模块路径
    */
   public async init(wasmPath?: string) {
-    if (this.initialized && !wasmPath) return;
+    if (this.initialized && !wasmPath) {
+      // 如果已经初始化但没有提供新的 wasmPath，且工作区还没索引，尝试索引
+      if (!this.workspaceIndexed) {
+        this.indexWorkspace().catch(e => this.log.error("Background indexing failed", { error: e }));
+      }
+      return;
+    }
 
     try {
       if (!this.parser) {
@@ -114,13 +122,17 @@ export class MemoryContextEngine {
       this.log.info(`Found ${files.length} files to index`);
 
       // 并行索引文件，但限制并发量
-      const CONCURRENCY = 10;
+      const CONCURRENCY = 5; // 降低并发量，避免嵌入模型过载
       for (let i = 0; i < files.length; i += CONCURRENCY) {
         const chunk = files.slice(i, i + CONCURRENCY);
         await Promise.all(chunk.map(async (f) => {
-          const content = await this.getFileContent(f);
-          if (content) {
-            await this.indexFile(f, content);
+          try {
+            const content = await this.getFileContent(f);
+            if (content) {
+              await this.indexFile(f, content);
+            }
+          } catch (err) {
+            this.log.error("Failed to index individual file during workspace crawl", { file: f, error: err });
           }
         }));
       }
@@ -157,12 +169,15 @@ export class MemoryContextEngine {
         
         // 符号增强索引
         for (const sym of symbols) {
+          // 更新全局符号映射，用于跨文件关联
+          this.symbolMap.set(sym.name, { filePath, symbol: sym });
+
           this.flexIndex.add(`${filePath}#${sym.name}`, sym.name);
           
           // 5. 语义索引 (集成 SemanticEngine)
           const embedding = await this.getEmbedding(sym.content);
           if (embedding) {
-            await this.semanticEngine.index(`${filePath}#${sym.name}`, sym.name, embedding);
+            await this.semanticEngine.indexItem(`${filePath}#${sym.name}`, sym.name, embedding);
           }
         }
       }
@@ -191,6 +206,18 @@ export class MemoryContextEngine {
       const oldestKey = this.contentCache.keys().next().value;
       if (oldestKey) {
         this.log.debug("LRU Evicting file", { filePath: oldestKey });
+        
+        // 清理 symbolMap 中的关联
+        const symbols = this.symbolCache.get(oldestKey);
+        if (symbols) {
+          for (const sym of symbols) {
+            const entry = this.symbolMap.get(sym.name);
+            if (entry && entry.filePath === oldestKey) {
+              this.symbolMap.delete(sym.name);
+            }
+          }
+        }
+
         this.contentCache.delete(oldestKey);
         this.symbolCache.delete(oldestKey);
         this.flexIndex.remove(oldestKey);
@@ -220,24 +247,38 @@ export class MemoryContextEngine {
   }
 
   /**
-   * 综合搜索 (FTS + 语义)
-   * 策略：优先 FTS，如果结果不足或匹配度低，则使用语义搜索补充。
+   * 综合搜索 (FTS + 语义 + 符号关联)
+   * 策略：优先 FTS，如果命中符号，则自动拉取其引用的定义。
    */
-  public async search(query: string, limit: number = 3): Promise<string[]> {
+  public async search(query: string, limit: number = 3, minScore: number = 0.4): Promise<string[]> {
     if (!this.initialized) return [];
     
-    this.log.info("Performing hybrid search", { query });
+    this.log.info("Performing hybrid search", { query, minScore });
     
     // 1. 尝试全文检索 (命中率高且快)
     const ftsResults = await this.searchFTS(query, limit);
-    if (ftsResults.length >= limit) return ftsResults;
-
-    // 2. 补充语义检索
-    const semanticResults = await this.searchSemantic(query, limit);
     
-    // 合并结果并去重，保持 FTS 结果在前（精确匹配优先）
-    const combined = [...new Set([...ftsResults, ...semanticResults])];
-    return combined.slice(0, limit);
+    // 2. 跨文件符号关联拉取 (Symbol-based Navigation)
+    const relatedFragments: string[] = [];
+    for (const res of ftsResults) {
+      // 简单启发式：从结果中寻找可能的符号名（大写字母开头或驼峰）
+      const possibleSymbols = res.match(/[A-Z][a-zA-Z0-9]+/g) || [];
+      for (const symName of possibleSymbols) {
+        const entry = this.symbolMap.get(symName);
+        if (entry && !ftsResults.some(r => r.includes(entry.filePath) && r.includes(symName))) {
+          relatedFragments.push(`[Related Definition] File: ${entry.filePath}\nSymbol: ${entry.symbol.name} (${entry.symbol.type})\nContent:\n${entry.symbol.content}`);
+        }
+      }
+    }
+
+    // 3. 补充语义检索
+    const semanticResults = (ftsResults.length + relatedFragments.length < limit) 
+      ? await this.searchSemantic(query, limit, minScore) 
+      : [];
+    
+    // 合并结果并去重
+    const combined = [...new Set([...ftsResults, ...relatedFragments, ...semanticResults])];
+    return combined.slice(0, limit + 2); // 允许稍微多一点，因为关联定义很重要
   }
 
   /**
@@ -251,12 +292,12 @@ export class MemoryContextEngine {
       const idStr = id.toString();
       if (idStr.includes('#')) {
         // 命中具体符号
-        const [path, symName] = idStr.split('#');
-        const symbols = this.symbolCache.get(path);
+        const [fPath, symName] = idStr.split('#');
+        const symbols = this.symbolCache.get(fPath);
         const sym = symbols?.find(s => s.name === symName);
         if (sym) {
           // 架构要求：AST 级切分，确保注入 LLM 的片段具有完整的语义上下文
-          fragments.push(`File: ${path}\nSymbol: ${sym.name} (${sym.type})\nContent:\n${sym.content}`);
+          fragments.push(`File: ${fPath}\nSymbol: ${sym.name} (${sym.type})\nContent:\n${sym.content}`);
         }
       } else {
         // 命中文件，基于关键字进行智能切片
@@ -277,37 +318,19 @@ export class MemoryContextEngine {
   private async getFileContent(filePath: string): Promise<string | null> {
     // 1. 优先从内存缓存获取
     if (this.contentCache.has(filePath)) {
+      this.touch(filePath); // 命中时更新活跃度
       return this.contentCache.get(filePath)!;
     }
 
     try {
-      // 2. 确保路径为绝对路径
-      const absolutePath = path.isAbsolute(filePath) 
-        ? filePath 
-        : path.join(Instance.directory, filePath);
-
-      // 3. 尝试读取磁盘
-      const content = await fs.readFile(absolutePath, "utf-8");
+      // 2. 统一使用适配器读取
+      const content = await Filesystem.readFile(filePath);
       
-      // 读取成功后加入缓存
+      // 读取成功后加入缓存并处理淘汰
       this.contentCache.set(filePath, content);
+      this.evictIfNecessary();
       return content;
     } catch (e) {
-      // 如果 fs 失败，尝试 Bun.file (如果存在)
-      try {
-        const absolutePath = path.isAbsolute(filePath) 
-          ? filePath 
-          : path.join(Instance.directory, filePath);
-          
-        const file = (globalThis as any).Bun?.file(absolutePath);
-        if (file && await file.exists()) {
-          const content = await file.text();
-          this.contentCache.set(filePath, content);
-          return content;
-        }
-      } catch (bunErr) {
-        // 忽略 Bun 错误
-      }
       this.log.error("Failed to read file", { filePath, error: e });
       return null;
     }
@@ -328,21 +351,22 @@ export class MemoryContextEngine {
   /**
    * 语义搜索 (SemanticEngine)
    */
-  public async searchSemantic(query: string, limit: number = 3): Promise<string[]> {
+  public async searchSemantic(query: string, limit: number = 3, minScore: number = 0.4): Promise<string[]> {
     const queryVector = await this.getEmbedding(query);
     if (!queryVector) return [];
 
-    const results = await this.semanticEngine.search(queryVector, limit);
+    const results = await this.semanticEngine.search(query, queryVector, limit, minScore);
     const snippets: string[] = [];
     
     for (const res of results) {
       // res 包含 id (filePath), title 等
       const filePath = res.id;
+      const score = res.score.toFixed(3);
       const content = await this.getFileContent(filePath);
       if (content) {
-        // 对于语义搜索，我们可能需要一个不同的片段提取逻辑，或者直接复用
+        // 对于语义搜索，我们使用基于 query 的相关性切片，并标注相似度
         const snippet = this.extractRelevantSnippet(content, query);
-        snippets.push(`[Semantic Match: ${filePath}]\n${snippet}`);
+        snippets.push(`[Semantic Match (Score: ${score}): ${filePath}]\n${snippet}`);
       }
     }
     return snippets;

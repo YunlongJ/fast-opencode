@@ -55,10 +55,10 @@ export namespace LLM {
       .tag("small", (input.small ?? false).toString())
       .tag("agent", input.agent.name)
       .tag("mode", input.agent.mode)
-    l.info("stream", {
+    l.info({
       modelID: input.model.id,
       providerID: input.model.providerID,
-    })
+    }, "stream")
 
     const cfgPromise = input.config ? Promise.resolve(input.config) : Config.get()
     const [language, cfg] = await Promise.all([Provider.getLanguage(input.model), cfgPromise])

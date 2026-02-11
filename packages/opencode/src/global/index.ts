@@ -2,6 +2,7 @@ import fs from "fs/promises"
 import { xdgData, xdgCache, xdgConfig, xdgState } from "xdg-basedir"
 import path from "path"
 import os from "os"
+import { Log } from "../util/log"
 
 const app = "opencode"
 
@@ -61,4 +62,4 @@ export namespace Global {
 }
 
 // We still want to trigger initialization but not as a top-level await that blocks CJS require
-Global.init().catch(console.error)
+Global.init().catch((err) => Log.Default.error(err))

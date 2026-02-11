@@ -54,7 +54,7 @@ export namespace SessionProcessor {
         await contextEngine.init();
         // 触发工作区索引 (后台执行)
         contextEngine.indexWorkspace().catch(err => {
-          log.error("Background workspace indexing failed", { error: err });
+          log.error({ err }, "Background workspace indexing failed");
         });
 
         const config = await Config.get()

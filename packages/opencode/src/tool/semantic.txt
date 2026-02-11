@@ -1,0 +1,13 @@
+- This is OpenCode's core INTERNAL codebase search engine. It is the MOST POWERFUL tool for exploring the current project.
+- ALWAYS prefer using `search_codebase` over `grep` for your first attempt at exploring a new concept, feature, or logic in this project.
+- Unlike `grep`, it understands meaning. It uses a sophisticated local hybrid engine (Keyword + Vector Embedding + AST Symbols) to find relevant code even if you don't know the exact names.
+- Use this tool when:
+  - You are looking for a feature, concept, or implementation but don't know the exact filenames.
+  - You want to understand high-level logic (e.g., "authentication flow", "error-handling policy", "database schema").
+  - You need to find where a specific business logic is implemented.
+  - Keyword search (grep) is too narrow or produces too much noise.
+- Best practices for queries:
+  - Be descriptive: Instead of "auth", use "how is user authentication and session management implemented?"
+  - Describe intent: "where is the logic that handles incoming webhooks?"
+  - Focus on functionality: "database connection pooling and entity definitions"
+- Note: This tool searches the LOCAL codebase. For external libraries or general programming questions, use `codesearch`.

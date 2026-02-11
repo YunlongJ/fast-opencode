@@ -6,10 +6,11 @@ import { Log } from "@/util/log";
  */
 export interface SymbolInfo {
   name: string;
-  type: "class" | "function" | "method" | "interface" | "variable";
+  type: "class" | "function" | "method" | "interface" | "variable" | "import";
   startLine: number;
   endLine: number;
   content: string;
+  references?: string[]; // 预留符号关联引用
 }
 
 /**
@@ -22,23 +23,28 @@ const QUERIES: Record<string, string> = {
     (method_definition name: (property_identifier) @method.name)
     (interface_declaration name: (type_identifier) @interface.name)
     (variable_declarator name: (identifier) @variable.name)
+    (import_declaration source: (string) @import.name)
   `,
   javascript: `
     (class_declaration name: (identifier) @class.name)
     (function_declaration name: (identifier) @function.name)
     (method_definition name: (property_identifier) @method.name)
     (variable_declarator name: (identifier) @variable.name)
+    (import_statement source: (string) @import.name)
   `,
   java: `
     (class_declaration name: (identifier) @class.name)
     (method_declaration name: (identifier) @method.name)
     (interface_declaration name: (identifier) @interface.name)
     (field_declaration (variable_declarator name: (identifier) @variable.name))
+    (import_declaration (scoped_identifier) @import.name)
   `,
   python: `
     (class_definition name: (identifier) @class.name)
     (function_definition name: (identifier) @function.name)
     (assignment left: (identifier) @variable.name)
+    (import_from_statement module: (dotted_name) @import.name)
+    (import_statement name: (dotted_name) @import.name)
   `
 };
 
@@ -81,12 +87,26 @@ export class ASTSymbolExtractor {
           const isDuplicate = symbols.some(s => s.name === node.text && s.startLine === node.startPosition.row);
           if (isDuplicate) continue;
 
+          // 提取符号定义
+          let content = node.text;
+          let containerNode = node;
+
+          // 向上查找最相关的容器节点以获取完整定义
+          // 对于 class, function, method，通常父节点或祖父节点包含完整体
+          if (type === "class" || type === "function" || type === "method" || type === "interface") {
+            containerNode = node.parent?.parent || node.parent || node;
+            content = containerNode.text;
+          } else if (type === "import" || type === "variable") {
+            containerNode = node.parent || node;
+            content = containerNode.text;
+          }
+
           symbols.push({
-            name: node.text,
+            name: node.text.replace(/['"]/g, ''), // 清理引号
             type: type,
-            startLine: node.startPosition.row,
-            endLine: node.endPosition.row,
-            content: node.parent?.text || node.text // 提取父节点以获取完整定义
+            startLine: containerNode.startPosition.row,
+            endLine: containerNode.endPosition.row,
+            content: content
           });
         }
       }

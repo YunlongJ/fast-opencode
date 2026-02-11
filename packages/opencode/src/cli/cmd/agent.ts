@@ -1,6 +1,7 @@
 import { cmd } from "./cmd"
 import * as prompts from "@clack/prompts"
 import { UI } from "../ui"
+import { Log } from "../../util/log"
 import { Global } from "../../global"
 import { Agent } from "../../agent/agent"
 import { Provider } from "../../provider/provider"
@@ -205,7 +206,7 @@ const AgentCreateCommand = cmd({
         const file = Bun.file(filePath)
         if (await file.exists()) {
           if (isFullyNonInteractive) {
-            console.error(`Error: Agent file already exists: ${filePath}`)
+            Log.Default.error({ filePath }, "Agent file already exists")
             process.exit(1)
           }
           prompts.log.error(`Agent file already exists: ${filePath}`)

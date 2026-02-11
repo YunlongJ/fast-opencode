@@ -129,6 +129,12 @@ for (const item of targets) {
     .join("-")
   console.log(`building ${name}`)
   await $`mkdir -p dist/${name}/bin`
+  
+  // Copy resources to dist directory
+  if (fs.existsSync(path.join(dir, "resources"))) {
+    console.log(`copying resources for ${name}`)
+    await $`cp -r resources dist/${name}/`
+  }
 
   const parserWorker = fs.realpathSync(path.resolve(dir, "./node_modules/@opentui/core/parser.worker.js"))
   const workerPath = "./src/cli/cmd/tui/worker.ts"
@@ -156,6 +162,7 @@ for (const item of targets) {
     entrypoints: ["./src/index.ts", parserWorker, workerPath],
     define: {
       OPENCODE_VERSION: `'${Script.version}'`,
+      OPENCODE_PACKAGED: "true",
       OTUI_TREE_SITTER_WORKER_PATH: bunfsRoot + workerRelativePath,
       OPENCODE_WORKER_PATH: workerPath,
       OPENCODE_CHANNEL: `'${Script.channel}'`,
