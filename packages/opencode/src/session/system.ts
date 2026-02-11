@@ -11,6 +11,28 @@ import PROMPT_CODEX from "./prompt/codex_header.txt"
 import PROMPT_MEMORY_MARKERS from "../agent/prompt/memory-markers.txt"
 import type { Provider } from "@/provider/provider"
 
+const CODE_GENERATION_GUIDELINES = `
+# Code Generation Strategy
+
+## Prefer Small, Incremental Changes
+- **AVOID generating large blocks of code** in a single response
+- **Prefer multiple small Edit calls** over one large Write call
+- Each code change should be focused and atomic
+- When modifying files, make minimal changes to achieve the goal
+
+## Edit vs Write Guidelines
+- **Use Edit tool** for modifying existing files - it preserves context and reduces token usage
+- **Use Write tool** only when creating entirely new files or doing complete rewrites
+- Break large changes into a series of smaller, targeted edits
+- Each edit should change only what's necessary
+
+## Response Efficiency
+- Keep code generation responses short and focused
+- Generate code in small, reviewable chunks
+- Prefer iterative refinement over bulk generation
+- This approach improves accuracy and reduces errors
+`.trim()
+
 export namespace SystemPrompt {
   export function instructions() {
     return PROMPT_CODEX.trim()
@@ -21,6 +43,9 @@ export namespace SystemPrompt {
 
     // Add memory markers prompt for all models
     prompts.push(PROMPT_MEMORY_MARKERS)
+
+    // Add code generation guidelines for all models
+    prompts.push(CODE_GENERATION_GUIDELINES)
 
     if (model.api.id.includes("gpt-5")) prompts.push(PROMPT_CODEX)
     else if (model.api.id.includes("gpt-") || model.api.id.includes("o1") || model.api.id.includes("o3"))
