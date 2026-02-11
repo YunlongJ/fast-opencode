@@ -90,4 +90,32 @@ export namespace Filesystem {
     }
     return result
   }
+
+  /**
+   * 读取文件内容，针对 Bun 环境优化。
+   * 优先使用 Bun.file().text()，回退到 Node.js fs。
+   */
+  export async function readFile(p: string): Promise<string> {
+    try {
+      // Bun 原生读取性能更高
+      const file = Bun.file(p);
+      return await file.text();
+    } catch (e) {
+      // 如果 Bun 环境不可用或读取失败，回退到 fs
+      const fs = await import("fs/promises");
+      return await fs.readFile(p, "utf-8");
+    }
+  }
+
+  /**
+   * 写入文件内容，针对 Bun 环境优化。
+   */
+  export async function writeFile(p: string, content: string): Promise<void> {
+    try {
+      await Bun.write(p, content);
+    } catch (e) {
+      const fs = await import("fs/promises");
+      await fs.writeFile(p, content, "utf-8");
+    }
+  }
 }

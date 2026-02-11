@@ -7,9 +7,9 @@
  */
 
 import { Log } from "@/util/log"
-import { EventLoop, TaskSummaryBoard, EVENTS, type ExecutorContext } from "./index"
+import { EventLoop, TaskSummaryBoard, EVENTS } from "./index"
 import { DEFAULT_TIMEOUT, MAX_CONCURRENCY } from "./config"
-import type { TaskSummary, TaskType } from "./types"
+import type { TaskType } from "./types"
 
 const log = Log.create({ service: "work-queue.processor" })
 

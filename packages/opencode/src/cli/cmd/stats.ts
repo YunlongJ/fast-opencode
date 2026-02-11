@@ -1,6 +1,7 @@
 import type { Argv } from "yargs"
 import { cmd } from "./cmd"
 import { Session } from "../../session"
+import { Log } from "../../util/log"
 import { bootstrap } from "../bootstrap"
 import { Storage } from "../../storage/storage"
 import { Project } from "../../project/project"
@@ -165,7 +166,7 @@ export async function aggregateSessionStats(days?: number, projectFilter?: strin
   }
 
   if (filteredSessions.length > 1000) {
-    console.log(`Large dataset detected (${filteredSessions.length} sessions). This may take a while...`)
+    Log.Default.info({ sessionCount: filteredSessions.length }, "Large dataset detected. This may take a while...")
   }
 
   if (filteredSessions.length === 0) {

@@ -16,7 +16,7 @@ import { Snapshot } from "../snapshot"
 import { Truncate } from "../tool/truncation"
 
 export async function InstanceBootstrap() {
-  Log.Default.info("bootstrapping", { directory: Instance.directory })
+  Log.Default.info({ directory: Instance.directory }, "bootstrapping")
   await Global.init()
   await Plugin.init()
   Share.init()

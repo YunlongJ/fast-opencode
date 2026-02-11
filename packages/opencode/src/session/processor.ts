@@ -4,563 +4,25 @@ import { Identifier } from "@/id/id"
 import { Session } from "."
 import { Agent } from "@/agent/agent"
 import { Snapshot } from "@/snapshot"
-import { SessionSummary } from "./summary"
 import { Bus } from "@/bus"
 import { SessionRetry } from "./retry"
 import { SessionStatus } from "./status"
-import { Plugin } from "@/plugin"
 import type { Provider } from "@/provider/provider"
-import { LLM } from "./llm"
 import { Config } from "@/config/config"
-import { SessionCompaction } from "./compaction"
-import { PermissionNext } from "@/permission/next"
-import { Question } from "@/question"
-import { ToolDependency } from "./tool-dependency"
-import { ToolResultCache } from "./tool-result-cache"
-import { ToolRegistry } from "@/tool/registry"
-import { type Tool } from "ai"
+import { LLM } from "./llm"
+import { type ModelMessage, type Tool } from "ai"
 import { BackgroundTaskHandler, type WorkQueueIntegrationConfig } from "./work-queue/integration"
+import { StreamRenderer } from "./engine/stream-renderer"
+import { ToolBlackboard } from "./engine/tool-blackboard"
+import { StepEngine } from "./engine/step-engine"
+import { ToolOrchestrator, createResourceLockManager as createEngineResourceLockManager, createToolExecutor as createEngineToolExecutor } from "./engine/tool-orchestrator"
+import { MemoryContextEngine } from "./engine/context"
 
 export namespace SessionProcessor {
-  const DOOM_LOOP_THRESHOLD = 3
   const log = Log.create({ service: "session.processor" })
 
   export type Info = Awaited<ReturnType<typeof create>>
   export type Result = Awaited<ReturnType<Info["process"]>>
-
-  interface ToolExecutor {
-    toolId: string
-    toolName: string
-    input: Record<string, any>
-    partId: string
-    callId: string
-    abort: AbortSignal
-    
-    // Refactoring 1: Unified interface
-    execute(ctx: { 
-      sessionID: string; 
-      assistantMessage: MessageV2.Assistant; 
-      agent: Agent.Info;
-      tools: Record<string, Tool>;
-    }): Promise<ToolExecutionResult>
-    getTimeout(): number
-    getResourceKeys(): Set<string>
-    getDependencies(): string[]
-  }
-
-  interface ToolExecutionResult {
-    ok: boolean
-    durationMs: number
-  }
-
-  type ResourceLockMode = "shared" | "exclusive"
-
-  /**
-   * ToolScheduler handles the execution of multiple tools with dependency management,
-   * concurrency control, and resource locking.
-   * 
-   * @VertxThreadSafety
-   */
-  class ToolScheduler {
-    private pending = new Set<string>()
-    private running = new Set<string>()
-    private completed = new Set<string>()
-    private results = new Map<string, ToolExecutionResult>()
-
-    constructor(
-      private executors: ToolExecutor[],
-      private tools: Record<string, Tool>,
-      private input: {
-        sessionID: string
-        assistantMessage: MessageV2.Assistant
-        agent: Agent.Info
-      },
-      private options: {
-        limiter: { run<T>(fn: () => Promise<T>): Promise<T> }
-        resourceLockManager: { acquire(keys: Set<string>, mode: ResourceLockMode): Promise<() => void> }
-        onToolExecuted?: (result: ToolExecutionResult, executor: ToolExecutor) => void
-      },
-    ) {
-      for (const e of executors) {
-        this.pending.add(e.callId)
-      }
-    }
-
-    /**
-     * Executes all scheduled tools.
-     * 
-     * @returns {Promise<void>}
-     * @throws {Error} If execution fails
-     */
-    async execute(): Promise<void> {
-      const toolCalls: MessageV2.ToolPart[] = this.executors.map((e) => ({
-        id: e.partId,
-        sessionID: this.input.sessionID,
-        messageID: this.input.assistantMessage.id,
-        type: "tool",
-        callID: e.callId,
-        tool: e.toolName,
-        state: {
-          status: "pending" as const,
-          input: e.input,
-          raw: "",
-        },
-      }))
-
-      // Use Refactoring 4: Optimized dependency analysis
-      const dependencies = new Map<string, Set<string>>()
-      for (const e of this.executors) {
-        dependencies.set(e.callId, new Set(e.getDependencies()))
-      }
-
-      // Check for circular dependencies
-      const checkCycle = (id: string, visited = new Set<string>(), stack = new Set<string>()): boolean => {
-        visited.add(id)
-        stack.add(id)
-        const deps = dependencies.get(id)
-        if (deps) {
-          for (const d of deps) {
-            if (!visited.has(d)) {
-              if (checkCycle(d, visited, stack)) return true
-            } else if (stack.has(d)) {
-              return true
-            }
-          }
-        }
-        stack.delete(id)
-        return false
-      }
-
-      for (const e of this.executors) {
-        if (checkCycle(e.callId)) {
-          log.error("Circular dependency detected in tool calls", { callId: e.callId })
-          // Break the cycle by clearing dependencies for this executor
-          dependencies.set(e.callId, new Set())
-        }
-      }
-
-      const scheduleNext = async () => {
-        const ready = this.executors.filter((e) => {
-          if (!this.pending.has(e.callId)) return false
-          const deps = dependencies.get(e.callId)
-          if (!deps) return true
-          return Array.from(deps).every((d) => this.completed.has(d))
-        })
-
-        if (ready.length === 0 && this.running.size === 0 && this.pending.size > 0) {
-          log.error("Deadlock detected in tool dependencies", {
-            pending: Array.from(this.pending),
-            completed: Array.from(this.completed),
-          })
-          return
-        }
-
-        const promises = ready.map(async (executor) => {
-          this.pending.delete(executor.callId)
-          this.running.add(executor.callId)
-
-          try {
-            await this.options.limiter.run(async () => {
-              const keys = executor.getResourceKeys()
-              const mode = toolLockMode(executor.toolName)
-              const release = await this.options.resourceLockManager.acquire(keys, mode)
-              try {
-                // Bug 8: Apply timeout from executor
-                const timeout = executor.getTimeout()
-                const resultPromise = executor.execute({
-                  ...this.input,
-                  tools: this.tools,
-                })
-
-                let result: ToolExecutionResult
-                if (timeout > 0) {
-                  const timeoutPromise = new Promise<ToolExecutionResult>((_, reject) =>
-                    setTimeout(() => reject(new Error(`Tool ${executor.toolName} timed out after ${timeout}ms`)), timeout),
-                  )
-                  result = await Promise.race([resultPromise, timeoutPromise])
-                } else {
-                  result = await resultPromise
-                }
-
-                this.results.set(executor.callId, result)
-                this.options.onToolExecuted?.(result, executor)
-              } finally {
-                release()
-              }
-            })
-          } catch (error) {
-            log.error("tool execution failed", {
-              sessionID: this.input.sessionID,
-              tool: executor.toolName,
-              callId: executor.callId,
-              error,
-            })
-            // Bug 9: Mark as error instead of silent failure
-            await Session.updatePart({
-              id: executor.partId,
-              messageID: this.input.assistantMessage.id,
-              sessionID: this.input.sessionID,
-              type: "tool",
-              tool: executor.toolName,
-              callID: executor.callId,
-              state: {
-                status: "error",
-                input: executor.input,
-                error: error instanceof Error ? error.message : String(error),
-                time: { start: Date.now(), end: Date.now() },
-              },
-            })
-          } finally {
-            this.running.delete(executor.callId)
-            this.completed.add(executor.callId)
-            await scheduleNext()
-          }
-        })
-
-        await Promise.all(promises)
-      }
-
-      await scheduleNext()
-    }
-  }
-
-  function toolLockMode(toolName: string): ResourceLockMode {
-    if (toolName === "read" || toolName === "grep") return "shared"
-    return "exclusive"
-  }
-
-  function createResourceLockManager() {
-    type QueueItem = {
-      mode: ResourceLockMode
-      resolve: (release: () => void) => void
-    }
-    type LockState = {
-      readers: number
-      writer: boolean
-      queue: QueueItem[]
-    }
-
-    const locks = new Map<string, LockState>()
-
-    const ensureState = (key: string): LockState => {
-      let state = locks.get(key)
-      if (!state) {
-        state = { readers: 0, writer: false, queue: [] }
-        locks.set(key, state)
-      }
-      return state
-    }
-
-    const drain = (key: string, state: LockState) => {
-      if (state.writer) return
-      if (state.readers > 0) return
-      if (state.queue.length === 0) return
-
-      const head = state.queue[0]
-      if (!head) return
-
-      if (head.mode === "exclusive") {
-        const next = state.queue.shift()!
-        state.writer = true
-        next.resolve(() => {
-          state.writer = false
-          drain(key, state)
-        })
-        return
-      }
-
-      while (state.queue.length > 0 && state.queue[0]!.mode === "shared" && !state.writer) {
-        const next = state.queue.shift()!
-        state.readers++
-        next.resolve(() => {
-          state.readers = Math.max(0, state.readers - 1)
-          if (state.readers === 0) {
-            drain(key, state)
-          }
-        })
-      }
-    }
-
-    const acquireKey = (key: string, mode: ResourceLockMode): Promise<() => void> => {
-      const state = ensureState(key)
-
-      const canAcquireNow = () => {
-        if (mode === "shared") {
-          if (state.writer) return false
-          if (state.queue.length > 0) return false
-          return true
-        }
-        if (state.writer) return false
-        if (state.readers > 0) return false
-        if (state.queue.length > 0) return false
-        return true
-      }
-
-      if (canAcquireNow()) {
-        if (mode === "shared") {
-          state.readers++
-          return Promise.resolve(() => {
-            state.readers = Math.max(0, state.readers - 1)
-            if (state.readers === 0) {
-              drain(key, state)
-            }
-          })
-        }
-        state.writer = true
-        return Promise.resolve(() => {
-          state.writer = false
-          drain(key, state)
-        })
-      }
-
-      return new Promise<() => void>((resolve) => {
-        state.queue.push({ mode, resolve })
-        drain(key, state)
-      })
-    }
-
-    const acquire = async (keys: Set<string>, mode: ResourceLockMode): Promise<() => void> => {
-      const sortedKeys = Array.from(keys).sort()
-
-      // To avoid deadlock, we must acquire all keys or none.
-      // But since we sort them, we can acquire them one by one IF we don't allow
-      // other acquisitions to jump in between and create a cycle.
-      // However, a simpler way to avoid deadlock with sorting is to ensure that
-      // if we can't get a key, we don't hold the ones we already got?
-      // No, sorting IS enough if all keys are acquired in the same order.
-      // The cycle A->B, B->C, C->A is impossible if everyone must acquire in order A, B, C.
-      // Tool 1: A, B. Gets A, waits for B.
-      // Tool 2: B, C. Gets B, waits for C.
-      // Tool 3: A, C. Waits for A.
-      // Tool 1 will eventually get B when T2 finishes.
-      // Wait, T2 is waiting for C. Who has C?
-      // If T4 has C and is waiting for... nothing? Then T4 finishes, T2 gets C, finishes, T1 gets B, finishes, T3 gets A.
-      // The only way to deadlock is a cycle. A cycle requires at least one person to acquire in a different order.
-      // e.g. T1: A then B, T2: B then A.
-      // With sorting, T2 becomes A then B. No cycle.
-
-      // So the current implementation is actually deadlock-free IF the only way locks are acquired is through this `acquire` method.
-      // The real issue might be the Limiter interaction.
-
-      const releases: Array<() => void> = []
-      try {
-        for (const key of sortedKeys) {
-          const release = await acquireKey(key, mode)
-          releases.push(release)
-        }
-      } catch (e) {
-        // Cleanup if something goes wrong
-        for (const r of releases) r()
-        throw e
-      }
-
-      return () => {
-        for (let i = releases.length - 1; i >= 0; i--) {
-          releases[i]!()
-        }
-      }
-    }
-
-    return { acquire }
-  }
-
-  async function executeTool(
-    executor: ToolExecutor,
-    tools: Record<string, Tool>,
-    input: {
-      sessionID: string
-      assistantMessage: MessageV2.Assistant
-      agent: Agent.Info
-    },
-  ): Promise<ToolExecutionResult> {
-    const start = Date.now()
-    const tool = tools[executor.toolName]
-    if (!tool) {
-      await Session.updatePart({
-        id: executor.partId,
-        messageID: input.assistantMessage.id,
-        sessionID: input.sessionID,
-        type: "tool",
-        tool: executor.toolName,
-        callID: executor.callId,
-        state: {
-          status: "error",
-          input: executor.input,
-          error: `Tool '${executor.toolName}' not found`,
-          time: {
-            start,
-            end: Date.now(),
-          },
-        },
-      })
-      return { ok: false, durationMs: Date.now() - start }
-    }
-
-    try {
-      const executeFn = tool.execute
-      if (!executeFn) {
-        throw new Error(`Tool '${executor.toolName}' has no execute function`)
-      }
-      const result = await executeFn(executor.input, {
-        toolCallId: executor.callId,
-        abortSignal: executor.abort,
-        messages: [],
-      })
-
-      await Session.updatePart({
-        id: executor.partId,
-        messageID: input.assistantMessage.id,
-        sessionID: input.sessionID,
-        type: "tool",
-        tool: executor.toolName,
-        callID: executor.callId,
-        state: {
-          status: "completed",
-          input: executor.input,
-          output: result.output,
-          title: result.title,
-          metadata: result.metadata,
-          attachments: result.attachments,
-          time: {
-            start,
-            end: Date.now(),
-          },
-        },
-      })
-
-      ToolResultCache.set({
-        sessionID: input.sessionID,
-        callID: executor.callId,
-        tool: executor.toolName,
-        input: executor.input,
-        output: result.output,
-        title: result.title,
-        metadata: result.metadata ?? {},
-        attachments: result.attachments,
-      })
-      return { ok: true, durationMs: Date.now() - start }
-    } catch (error) {
-      await Session.updatePart({
-        id: executor.partId,
-        messageID: input.assistantMessage.id,
-        sessionID: input.sessionID,
-        type: "tool",
-        tool: executor.toolName,
-        callID: executor.callId,
-        state: {
-          status: "error",
-          input: executor.input,
-          error: error instanceof Error ? error.message : String(error),
-          time: {
-            start,
-            end: Date.now(),
-          },
-        },
-      })
-      return { ok: false, durationMs: Date.now() - start }
-    }
-  }
-
-  async function executeToolsParallel(
-    executors: ToolExecutor[],
-    tools: Record<string, Tool>,
-    input: {
-      sessionID: string
-      assistantMessage: MessageV2.Assistant
-      agent: Agent.Info
-    },
-    maxParallel?: number,
-    shared?: {
-      limiter: { run<T>(fn: () => Promise<T>): Promise<T> }
-      resourceLockManager: { acquire(keys: Set<string>, mode: ResourceLockMode): Promise<() => void> }
-      onToolExecuted?: (result: ToolExecutionResult, executor: ToolExecutor) => void
-    },
-  ): Promise<void> {
-    if (executors.length === 0) return
-
-    const limit = Math.max(1, maxParallel ?? 10)
-    const limiter = shared?.limiter ?? (() => {
-      let active = 0
-      const queue: Array<() => void> = []
-      const notify = () => {
-        while (active < limit && queue.length > 0) {
-          const next = queue.shift()
-          if (next) {
-            active++
-            next()
-          }
-        }
-      }
-      async function run<T>(fn: () => Promise<T>): Promise<T> {
-        if (active >= limit) {
-          await new Promise<void>((resolve) => queue.push(resolve))
-        } else {
-          active++
-        }
-        try {
-          return await fn()
-        } finally {
-          active--
-          notify()
-        }
-      }
-      return { run, notify }
-    })()
-
-    const resourceLockManager = shared?.resourceLockManager ?? createResourceLockManager()
-
-    const scheduler = new ToolScheduler(executors, tools, input, {
-      limiter,
-      resourceLockManager,
-      onToolExecuted: shared?.onToolExecuted,
-    })
-
-    await scheduler.execute()
-  }
-
-  function createToolExecutor(
-    toolName: string,
-    input: Record<string, any>,
-    partId: string,
-    callId: string,
-    abort: AbortSignal,
-    toolPart: MessageV2.ToolPart,
-  ): ToolExecutor {
-    return {
-      toolId: toolName,
-      toolName,
-      input,
-      partId,
-      callId,
-      abort,
-      async execute(ctx) {
-        return executeTool(this, ctx.tools, ctx)
-      },
-      getTimeout() {
-        const tool = ToolRegistry.getToolSync?.(this.toolName)
-        if (tool?.getTimeout) {
-          return tool.getTimeout(this.input)
-        }
-        // Bug 8: Default timeout 60s, can be overridden by specific tools if needed
-        return 60_000
-      },
-      getResourceKeys() {
-        const tool = ToolRegistry.getToolSync?.(this.toolName)
-        if (tool?.getResourceKeys) {
-          return tool.getResourceKeys(this.input)
-        }
-        return ToolDependency.resourceKeys(toolPart)
-      },
-      getDependencies() {
-        const tool = ToolRegistry.getToolSync?.(this.toolName)
-        if (tool?.getDependencies) {
-          return tool.getDependencies(this.input)
-        }
-        const result = ToolDependency.analyze([toolPart])
-        return Array.from(result.dependencies.get(this.callId) ?? [])
-      },
-    }
-  }
 
   export function create(input: {
     assistantMessage: MessageV2.Assistant
@@ -585,14 +47,23 @@ export namespace SessionProcessor {
       async process(streamInput: LLM.StreamInput) {
         log.info("process")
         needsCompaction = false
+        const blackboard = new ToolBlackboard()
+
+        // 初始化内存上下文引擎 (FlexSearch + Tree-sitter)
+        const contextEngine = MemoryContextEngine.getInstance();
+        await contextEngine.init();
+        // 触发工作区索引 (后台执行)
+        contextEngine.indexWorkspace().catch(err => {
+          log.error({ err }, "Background workspace indexing failed");
+        });
+
         const config = await Config.get()
         const shouldBreak = config.experimental?.continue_loop_on_deny !== true
         const parallelEnabled = config.experimental?.parallel_execution !== false
-        const maxParallelTools = config.experimental?.max_parallel_tools ?? 10
+        const maxParallelTools = config.experimental?.max_parallel_tools ?? 16
         const agentInfo = await Agent.get(input.assistantMessage.agent)
         const exp = (config.experimental ?? {}) as { delta_throttle_ms?: number; deltaThrottleMs?: number }
-        const deltaThrottleMsRef = { value: Math.max(0, (exp.delta_throttle_ms ?? exp.deltaThrottleMs ?? 80)) }
-        const resourceLockManager = createResourceLockManager()
+        const resourceLockManager = createEngineResourceLockManager()
         const concurrencyRef = { value: Math.max(1, maxParallelTools) }
         let toolSampleCount = 0
         let toolErrorCount = 0
@@ -625,7 +96,7 @@ export namespace SessionProcessor {
           }
           return { run, notify }
         })()
-        const onToolExecuted = (r: ToolExecutionResult) => {
+        const onToolExecuted = (r: { durationMs: number; ok: boolean }) => {
           toolSampleCount++
           toolDurationSum += r.durationMs
           if (!r.ok) toolErrorCount++
@@ -639,491 +110,96 @@ export namespace SessionProcessor {
           if (errRate >= 0.25) next = Math.max(1, Math.floor(prev * 0.7))
           else if (avg >= 2_500) next = Math.max(1, prev - 1)
           else if (avg <= 600) next = Math.min(maxParallelTools, prev + 1)
-          
+
           if (next !== prev) {
             concurrencyRef.value = next
-            limiter.notify() // Notify waiting tasks if concurrency increased
+            limiter.notify()
           }
-          
+
           toolSampleCount = 0
           toolErrorCount = 0
           toolDurationSum = 0
           toolAdjustAt = now
         }
-        let pendingExecutors: ToolExecutor[] = []
-        let parallelExecutedCount = 0
-        let flushPromise: Promise<void> | null = null
-        const scheduleFlush = () => {
-          if (!parallelEnabled) return
-          if (pendingExecutors.length === 0) return
-          if (flushPromise) return
-          const executors = pendingExecutors
-          pendingExecutors = []
-          const tools = streamInput.tools
-          
-          const doFlush = async () => {
-            try {
-              await executeToolsParallel(
-                executors,
-                tools,
-                {
-                  sessionID: input.sessionID,
-                  assistantMessage: input.assistantMessage,
-                  agent: agentInfo,
-                },
-                maxParallelTools,
-                { resourceLockManager, limiter, onToolExecuted },
-              )
-            } catch (error) {
-              log.error("flush failed", { error })
-              // Bug 9: Mark all tasks in this batch as failed if the flush itself fails
-              for (const e of executors) {
-                await Session.updatePart({
-                  id: e.partId,
-                  messageID: input.assistantMessage.id,
-                  sessionID: input.sessionID,
-                  type: "tool",
-                  tool: e.toolName,
-                  callID: e.callId,
-                  state: {
-                    status: "error",
-                    input: e.input,
-                    error: `Flush failed: ${error instanceof Error ? error.message : String(error)}`,
-                    time: { start: Date.now(), end: Date.now() },
-                  },
-                })
-              }
-            }
-          }
-
-          flushPromise = doFlush().finally(() => {
-            flushPromise = null
-          })
+        const stripExecute = (tools: Record<string, Tool>): Record<string, Tool> => {
+          return Object.fromEntries(
+            Object.entries(tools).map(([id, t]) => {
+              if (!t.execute) return [id, t]
+              return [id, { ...t, execute: undefined }]
+            }),
+          )
         }
-        let textBuffer = ""
-        let textTimer: any | null = null
-        let textPartRef: MessageV2.TextPart | undefined
-        let reasoningBuffers: Record<string, { part: MessageV2.ReasoningPart; buffer: string; timer: any | null }> = {}
-        let deltaEvents = 0
-        let deltaAdjustTimer: any | null = null
-        deltaAdjustTimer = setInterval(() => {
-          const perSecond = deltaEvents
-          deltaEvents = 0
-          if (exp.delta_throttle_ms !== undefined || exp.deltaThrottleMs !== undefined) return
-          if (perSecond >= 180) deltaThrottleMsRef.value = 140
-          else if (perSecond >= 90) deltaThrottleMsRef.value = 100
-          else if (perSecond <= 25) deltaThrottleMsRef.value = 60
-          else deltaThrottleMsRef.value = 80
-        }, 1_000)
-        const flushText = async () => {
-          if (!textPartRef || !textBuffer) {
-            textTimer = null
-            return
-          }
-          const delta = textBuffer
-          textBuffer = ""
-          await Session.updatePart({ part: textPartRef, delta })
-          textTimer = null
-        }
-        const pushTextDelta = (part: MessageV2.TextPart, delta: string) => {
-          textPartRef = part
-          textBuffer += delta
-          deltaEvents++
-          if (!textTimer) {
-            textTimer = setTimeout(() => {
-              flushText().catch(() => {})
-            }, deltaThrottleMsRef.value)
+        const getResponseMessages = async (result: any): Promise<ModelMessage[]> => {
+          if (!result) return []
+          try {
+            const resp = await (result?.response?.then ? result.response : Promise.resolve(result?.response))
+            return resp?.messages ?? []
+          } catch (e) {
+            log.error("Failed to get response messages from stream result", { error: e })
+            return []
           }
         }
-        const flushReasoning = async (id: string) => {
-          const entry = reasoningBuffers[id]
-          if (!entry || !entry.buffer) {
-            entry && (entry.timer = null)
-            return
-          }
-          const delta = entry.buffer
-          entry.buffer = ""
-          await Session.updatePart({ part: entry.part, delta })
-          entry.timer = null
+        let metrics = {
+          ttftMs: -1,
+          toolCalls: 0,
+          toolOk: 0,
+          toolError: 0,
+          toolDurationMs: 0,
+          textDeltaCount: 0,
+          reasoningDeltaCount: 0,
+          plannedNodes: 0,
         }
-        const pushReasoningDelta = (id: string, part: MessageV2.ReasoningPart, delta: string) => {
-          if (!reasoningBuffers[id]) {
-            reasoningBuffers[id] = { part, buffer: "", timer: null }
-          }
-          reasoningBuffers[id].part = part
-          reasoningBuffers[id].buffer += delta
-          deltaEvents++
-          if (!reasoningBuffers[id].timer) {
-            reasoningBuffers[id].timer = setTimeout(() => {
-              flushReasoning(id).catch(() => {})
-            }, deltaThrottleMsRef.value)
-          }
-        }
-        const stopTimers = () => {
-          if (textTimer) {
-            clearTimeout(textTimer)
-            textTimer = null
-          }
-          for (const entry of Object.values(reasoningBuffers)) {
-            if (entry.timer) {
-              clearTimeout(entry.timer)
-              entry.timer = null
-            }
-          }
-          if (deltaAdjustTimer) {
-            clearInterval(deltaAdjustTimer)
-            deltaAdjustTimer = null
-          }
-        }
+        const renderer = new StreamRenderer({
+          deltaThrottleMs: exp.delta_throttle_ms ?? exp.deltaThrottleMs,
+        })
+        const orchestrator = new ToolOrchestrator(
+          { sessionID: input.sessionID, assistantMessage: input.assistantMessage, agent: agentInfo },
+          streamInput.tools,
+          { limiter, resourceLockManager, onToolExecuted: (r) => onToolExecuted(r) },
+        )
+        const snapshotRef = { value: snapshot as string | undefined }
+        const stepEngine = new StepEngine(
+          {
+            sessionID: input.sessionID,
+            assistantMessage: input.assistantMessage,
+            model: input.model,
+            agent: agentInfo,
+            abort: input.abort,
+            config,
+            shouldBreak,
+            parallelEnabled,
+          },
+          {
+            renderer,
+            orchestrator,
+            blackboard,
+            toolcalls,
+            snapshot: snapshotRef,
+            stripExecute,
+            getResponseMessages,
+            createToolExecutor: createEngineToolExecutor,
+          },
+        )
+        const stopTimers = () => renderer.stopTimers()
         while (true) {
           try {
-            let currentText: MessageV2.TextPart | undefined
-            let reasoningMap: Record<string, MessageV2.ReasoningPart> = {}
-            const stream = await LLM.stream({ ...streamInput, config })
-
-            for await (const value of stream.fullStream) {
-              input.abort.throwIfAborted()
-              switch (value.type) {
-                case "start":
-                  SessionStatus.set(input.sessionID, { type: "busy" })
-                  break
-
-                case "reasoning-start":
-                  if (value.id in reasoningMap) {
-                    continue
-                  }
-                  reasoningMap[value.id] = {
-                    id: Identifier.ascending("part"),
-                    messageID: input.assistantMessage.id,
-                    sessionID: input.assistantMessage.sessionID,
-                    type: "reasoning",
-                    text: "",
-                    time: {
-                      start: Date.now(),
-                    },
-                    metadata: value.providerMetadata,
-                  }
-                  break
-
-                case "reasoning-delta":
-                  if (value.id in reasoningMap) {
-                    const part = reasoningMap[value.id]
-                    part.text += value.text
-                    if (value.providerMetadata) part.metadata = value.providerMetadata
-                    if (value.text) pushReasoningDelta(value.id, part, value.text)
-                  }
-                  break
-
-                case "reasoning-end":
-                  if (value.id in reasoningMap) {
-                    const part = reasoningMap[value.id]
-                    part.text = part.text.trimEnd()
-
-                    part.time = {
-                      ...part.time,
-                      end: Date.now(),
-                    }
-                    if (value.providerMetadata) part.metadata = value.providerMetadata
-                    const buffered = reasoningBuffers[value.id]
-                    if (buffered?.timer) {
-                      clearTimeout(buffered.timer)
-                      buffered.timer = null
-                    }
-                    if (buffered) {
-                      buffered.buffer = ""
-                      buffered.part = part
-                    }
-                    await Session.updatePart(part)
-                    delete reasoningMap[value.id]
-                  }
-                  break
-
-                case "tool-input-start":
-                  const part = await Session.updatePart({
-                    id: toolcalls[value.id]?.id ?? Identifier.ascending("part"),
-                    messageID: input.assistantMessage.id,
-                    sessionID: input.assistantMessage.sessionID,
-                    type: "tool",
-                    tool: value.toolName,
-                    callID: value.id,
-                    state: {
-                      status: "pending",
-                      input: {},
-                      raw: "",
-                    },
-                  })
-                  toolcalls[value.id] = part as MessageV2.ToolPart
-                  break
-
-                case "tool-input-delta":
-                  break
-
-                case "tool-input-end":
-                  break
-
-                case "tool-call": {
-                  const match = toolcalls[value.toolCallId]
-                  if (match) {
-                    const part = await Session.updatePart({
-                      ...match,
-                      tool: value.toolName,
-                      state: parallelEnabled
-                        ? {
-                            status: "pending" as const,
-                            input: value.input,
-                            raw: "",
-                          }
-                        : {
-                            status: "running" as const,
-                            input: value.input,
-                            time: { start: Date.now() },
-                          },
-                      metadata: value.providerMetadata,
-                    })
-                    toolcalls[value.toolCallId] = part as MessageV2.ToolPart
-
-                    if (parallelEnabled) {
-                      pendingExecutors.push(
-                        createToolExecutor(
-                          value.toolName,
-                          value.input,
-                          part.id,
-                          value.toolCallId,
-                          input.abort,
-                          part as MessageV2.ToolPart,
-                        ),
-                      )
-                      if (pendingExecutors.length >= Math.min(2, maxParallelTools)) {
-                        scheduleFlush()
-                      }
-                    }
-
-                    if (!parallelEnabled) {
-                      const parts = await MessageV2.parts(input.assistantMessage.id)
-                      const lastThree = parts.slice(-DOOM_LOOP_THRESHOLD)
-
-                      if (
-                        lastThree.length === DOOM_LOOP_THRESHOLD &&
-                        lastThree.every(
-                          (p) =>
-                            p.type === "tool" &&
-                            p.tool === value.toolName &&
-                            p.state.status !== "pending" &&
-                            JSON.stringify(p.state.input) === JSON.stringify(value.input),
-                        )
-                      ) {
-                        await PermissionNext.ask({
-                          permission: "doom_loop",
-                          patterns: [value.toolName],
-                          sessionID: input.assistantMessage.sessionID,
-                          metadata: {
-                            tool: value.toolName,
-                            input: value.input,
-                          },
-                          always: [value.toolName],
-                          ruleset: agentInfo.permission,
-                        })
-                      }
-                    }
-                  }
-                  break
-                }
-                case "tool-result": {
-                  const match = toolcalls[value.toolCallId]
-                  if (match && (match.state.status === "running" || match.state.status === "pending")) {
-                    const attachments = value.output.attachments?.map(
-                      (attachment: Omit<MessageV2.FilePart, "id" | "messageID" | "sessionID">) => ({
-                        ...attachment,
-                        id: Identifier.ascending("part"),
-                        messageID: match.messageID,
-                        sessionID: match.sessionID,
-                      }),
-                    )
-                    await Session.updatePart({
-                      ...match,
-                      state: {
-                        status: "completed",
-                        input: value.input ?? match.state.input,
-                        output: value.output.output,
-                        metadata: value.output.metadata,
-                        title: value.output.title,
-                        time: {
-                          start: (match.state as any).time?.start ?? Date.now(),
-                          end: Date.now(),
-                        },
-                        attachments,
-                      },
-                    })
-
-                    delete toolcalls[value.toolCallId]
-                  }
-                  break
-                }
-
-                case "tool-error": {
-                  const match = toolcalls[value.toolCallId]
-                  if (match && (match.state.status === "running" || match.state.status === "pending")) {
-                    await Session.updatePart({
-                      ...match,
-                      state: {
-                        status: "error",
-                        input: value.input ?? match.state.input,
-                        error: (value.error as any).toString(),
-                        time: {
-                          start: (match.state as any).time?.start ?? Date.now(),
-                          end: Date.now(),
-                        },
-                      },
-                    })
-
-                    if (
-                      value.error instanceof PermissionNext.RejectedError ||
-                      value.error instanceof Question.RejectedError
-                    ) {
-                      blocked = shouldBreak
-                    }
-                    delete toolcalls[value.toolCallId]
-                  }
-                  break
-                }
-                case "error":
-                  throw value.error
-
-                case "start-step":
-                  snapshot = await Snapshot.track()
-                  await Session.updatePart({
-                    id: Identifier.ascending("part"),
-                    messageID: input.assistantMessage.id,
-                    sessionID: input.sessionID,
-                    snapshot,
-                    type: "step-start",
-                  })
-                  break
-
-                case "finish-step":
-                  const usage = Session.getUsage({
-                    model: input.model,
-                    usage: value.usage,
-                    metadata: value.providerMetadata,
-                  })
-                  input.assistantMessage.finish = value.finishReason
-                  input.assistantMessage.cost += usage.cost
-                  input.assistantMessage.tokens = usage.tokens
-                  await Session.updatePart({
-                    id: Identifier.ascending("part"),
-                    reason: value.finishReason,
-                    snapshot: await Snapshot.track(),
-                    messageID: input.assistantMessage.id,
-                    sessionID: input.assistantMessage.sessionID,
-                    type: "step-finish",
-                    tokens: usage.tokens,
-                    cost: usage.cost,
-                  })
-                  await Session.updateMessage(input.assistantMessage)
-                  if (snapshot) {
-                    const patch = await Snapshot.patch(snapshot)
-                    if (patch.files.length) {
-                      await Session.updatePart({
-                        id: Identifier.ascending("part"),
-                        messageID: input.assistantMessage.id,
-                        sessionID: input.sessionID,
-                        type: "patch",
-                        hash: patch.hash,
-                        files: patch.files,
-                      })
-                    }
-                    snapshot = undefined
-                  }
-                  SessionSummary.summarize({
-                    sessionID: input.sessionID,
-                    messageID: input.assistantMessage.parentID,
-                  })
-                  if (await SessionCompaction.isOverflow({ tokens: usage.tokens, model: input.model })) {
-                    needsCompaction = true
-                  }
-                  if (flushPromise) await flushPromise
-                  if (parallelEnabled && pendingExecutors.length > 0) {
-                    scheduleFlush()
-                    if (flushPromise) await flushPromise
-                  }
-                  break
-
-                case "text-start":
-                  currentText = {
-                    id: Identifier.ascending("part"),
-                    messageID: input.assistantMessage.id,
-                    sessionID: input.assistantMessage.sessionID,
-                    type: "text",
-                    text: "",
-                    time: {
-                      start: Date.now(),
-                    },
-                    metadata: value.providerMetadata,
-                  }
-                  break
-
-                case "text-delta":
-                  if (currentText) {
-                    currentText.text += value.text
-                    if (value.providerMetadata) currentText.metadata = value.providerMetadata
-                    if (value.text) pushTextDelta(currentText, value.text)
-                  }
-                  break
-
-                case "text-end":
-                  if (currentText) {
-                    await flushText()
-                    currentText.text = currentText.text.trimEnd()
-                    const textOutput = await Plugin.trigger(
-                      "experimental.text.complete",
-                      {
-                        sessionID: input.sessionID,
-                        messageID: input.assistantMessage.id,
-                        partID: currentText.id,
-                      },
-                      { text: currentText.text },
-                    )
-                    currentText.text = textOutput.text
-                    currentText.time = {
-                      start: Date.now(),
-                      end: Date.now(),
-                    }
-                    if (value.providerMetadata) currentText.metadata = value.providerMetadata
-                    await Session.updatePart(currentText)
-                  }
-                  currentText = undefined
-                  break
-
-                case "finish":
-                  await flushText()
-                  for (const id of Object.keys(reasoningBuffers)) {
-                    await flushReasoning(id)
-                  }
-                  if (flushPromise) await flushPromise
-                  if (parallelEnabled && pendingExecutors.length > 0) {
-                    scheduleFlush()
-                    if (flushPromise) await flushPromise
-                  }
-                  break
-
-                default:
-                  log.info("unhandled", {
-                    ...value,
-                  })
-                  continue
-              }
-              if (needsCompaction) break
-            }
-            await flushText()
-            for (const id of Object.keys(reasoningBuffers)) {
-              await flushReasoning(id)
-            }
-            if (flushPromise) await flushPromise
-            if (parallelEnabled && pendingExecutors.length > 0) {
-              scheduleFlush()
-              if (flushPromise) await flushPromise
-            }
+            const stepResult = await stepEngine.run(streamInput)
+            blocked = stepResult.blocked
+            needsCompaction = stepResult.needsCompaction
+            metrics = stepResult.metrics
+            snapshot = snapshotRef.value
             stopTimers()
+            log.info("metrics", {
+              sessionID: input.sessionID,
+              ttftMs: metrics.ttftMs,
+              toolCalls: metrics.toolCalls,
+              toolOk: metrics.toolOk,
+              toolError: metrics.toolError,
+              toolDurationMs: metrics.toolDurationMs,
+              textDeltaCount: metrics.textDeltaCount,
+              reasoningDeltaCount: metrics.reasoningDeltaCount,
+              plannedNodes: metrics.plannedNodes,
+            })
           } catch (e: any) {
             log.error("process", {
               error: e,
@@ -1185,6 +261,7 @@ export namespace SessionProcessor {
           }
           input.assistantMessage.time.completed = Date.now()
           await Session.updateMessage(input.assistantMessage)
+          orchestrator.clear()
           if (needsCompaction) return "compact"
           if (blocked) return "stop"
           if (input.assistantMessage.error) return "stop"

@@ -24,7 +24,6 @@ import MAX_STEPS from "../session/prompt/max-steps.txt"
 import { defer } from "../util/defer"
 import { clone } from "remeda"
 import { ToolRegistry } from "../tool/registry"
-import { SessionChecker } from "./checker"
 import { LSP } from "../lsp"
 import { ReadTool } from "../tool/read"
 import { ListTool } from "../tool/ls"
@@ -35,6 +34,7 @@ import { spawn } from "child_process"
 import { Command } from "../command"
 import { $, fileURLToPath } from "bun"
 import { ConfigMarkdown } from "../config/markdown"
+import { Config } from "../config/config"
 import { SessionSummary } from "./summary"
 import { NamedError } from "@opencode-ai/util/error"
 import { fn } from "@/util/fn"
@@ -471,10 +471,6 @@ export namespace SessionPrompt {
         currentSessionID = s.parentID
       }
 
-      if (!effectivePrompt) {
-        effectivePrompt = SessionChecker.getEffectivePrompt(sessionID, lastUser.agent)
-      }
-
       if (effectivePrompt) {
         agent = { ...agent, prompt: effectivePrompt }
       }
@@ -583,17 +579,6 @@ export namespace SessionPrompt {
         tools,
         model,
       })
-      if (result === "continue" || result === "stop") {
-        SessionChecker.check({
-          sessionID,
-          agent: lastUser.agent,
-          messages: await Session.messages({ sessionID }),
-          model,
-          currentPrompt: [...systemPrompts, agent.prompt ?? ""].join("\n\n"),
-          agentPrompt: agent.prompt,
-          abort,
-        }).catch(() => {})
-      }
       if (result === "stop") break
       if (result === "compact") {
         await SessionCompaction.create({
@@ -688,6 +673,7 @@ export namespace SessionPrompt {
       { args: taskArgs },
     )
     let executionError: Error | undefined
+    const cfg = await Config.get()
     const taskAgent = await Agent.get(task.agent)
     const taskCtx: Tool.Context = {
       agent: task.agent,
@@ -708,6 +694,7 @@ export namespace SessionPrompt {
         } satisfies MessageV2.ToolPart)
       },
       async ask(req) {
+        if (cfg.experimental?.skip_permissions === true) return
         await PermissionNext.ask({
           ...req,
           sessionID: sessionID,
@@ -811,6 +798,7 @@ export namespace SessionPrompt {
     messages: MessageV2.WithParts[]
   }) {
     using _ = log.time("resolveTools")
+    const cfg = await Config.get()
     const tools: Record<string, AITool> = {}
 
     const context = (args: any, options: ToolCallOptions): Tool.Context => ({
@@ -839,6 +827,7 @@ export namespace SessionPrompt {
         }
       },
       async ask(req) {
+        if (cfg.experimental?.skip_permissions === true) return
         await PermissionNext.ask({
           ...req,
           sessionID: input.session.id,

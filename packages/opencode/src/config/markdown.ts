@@ -68,7 +68,7 @@ export namespace ConfigMarkdown {
   }
 
   export async function parse(filePath: string) {
-    const template = await Bun.file(filePath).text()
+    const template = (await Bun.file(filePath).text()).replaceAll("\r\n", "\n")
 
     try {
       const md = matter(template)

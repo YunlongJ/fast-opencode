@@ -24,6 +24,7 @@ interface FileReadResult {
   filePath: string
   title: string
   content: string
+  raw: string[]
   truncated: boolean
   error?: string
   size: number
@@ -45,6 +46,7 @@ async function readSingleFile(
       filePath,
       title,
       content: "",
+      raw: [],
       truncated: false,
       error: `File not found: ${absolutePath}`,
       size: 0,
@@ -63,6 +65,7 @@ async function readSingleFile(
       filePath,
       title,
       content: "",
+      raw: [],
       truncated: false,
       error: `Cannot read binary file: ${absolutePath}`,
       size: fileSize,
@@ -172,6 +175,7 @@ async function readSingleFile(
     filePath,
     title,
     content: output,
+    raw,
     truncated,
     size: fileSize,
     sizeHuman: formatSize(fileSize),
@@ -315,6 +319,20 @@ This tool is specifically designed for high-performance, parallel reading of mul
       .slice(0, 3)
       .map((r) => r.title)
       .join(", ")
+
+    // 索引成功读取的文件内容到 MemoryContextEngine
+    try {
+      const { MemoryContextEngine } = await import("../session/engine/context");
+      const engine = MemoryContextEngine.getInstance();
+      await engine.init();
+      for (const res of successes) {
+        if (res.raw) {
+          await engine.indexFile(res.filePath, res.raw.join("\n"));
+        }
+      }
+    } catch (e) {
+      // 索引失败不应阻断工具执行
+    }
 
     return {
       title: `${results.length} file${results.length > 1 ? "s" : ""}`,

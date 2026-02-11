@@ -3,6 +3,7 @@ import { Provider } from "@/provider/provider"
 import { Log } from "@/util/log"
 import {
   streamText,
+  generateText,
   wrapLanguageModel,
   type ModelMessage,
   type StreamTextResult,
@@ -54,10 +55,10 @@ export namespace LLM {
       .tag("small", (input.small ?? false).toString())
       .tag("agent", input.agent.name)
       .tag("mode", input.agent.mode)
-    l.info("stream", {
+    l.info({
       modelID: input.model.id,
       providerID: input.model.providerID,
-    })
+    }, "stream")
 
     const cfgPromise = input.config ? Promise.resolve(input.config) : Config.get()
     const [language, cfg] = await Promise.all([Provider.getLanguage(input.model), cfgPromise])
@@ -295,5 +296,27 @@ export namespace LLM {
       }
     }
     return false
+  }
+
+  export type GenerateInput = {
+    model: Provider.Model | { providerID: string; modelID: string }
+    messages: ModelMessage[]
+    system?: string[]
+    abort?: AbortSignal
+  }
+
+  export async function generate(input: GenerateInput) {
+    const model = "id" in input.model ? input.model : await Provider.getModel(input.model.providerID, input.model.modelID)
+
+    const language = await Provider.getLanguage(model)
+
+    return generateText({
+      model: language,
+      messages: [
+        ...(input.system ?? []).map((content) => ({ role: "system", content }) as ModelMessage),
+        ...input.messages,
+      ],
+      abortSignal: input.abort,
+    })
   }
 }

@@ -28,15 +28,11 @@ import { PrCommand } from "./cli/cmd/pr"
 import { SessionCommand } from "./cli/cmd/session"
 
 process.on("unhandledRejection", (e) => {
-  Log.Default.error("rejection", {
-    e: e instanceof Error ? e.message : e,
-  })
+  Log.Default.error({ err: e }, "rejection")
 })
 
 process.on("uncaughtException", (e) => {
-  Log.Default.error("exception", {
-    e: e instanceof Error ? e.message : e,
-  })
+  Log.Default.error({ err: e }, "exception")
 })
 
 const cli = yargs(hideBin(process.argv))
@@ -57,23 +53,28 @@ const cli = yargs(hideBin(process.argv))
     choices: ["DEBUG", "INFO", "WARN", "ERROR"],
   })
   .middleware(async (opts) => {
+    const isLocal = Installation.isLocal()
+    const printLogs = process.argv.includes("--print-logs")
+
     await Log.init({
-      print: process.argv.includes("--print-logs"),
-      dev: Installation.isLocal(),
+      print: printLogs,
+      dev: isLocal,
       level: (() => {
         if (opts.logLevel) return opts.logLevel as Log.Level
-        if (Installation.isLocal()) return "DEBUG"
-        return "INFO"
+        if (isLocal) return "DEBUG"
+        return "ERROR"
       })(),
     })
 
     process.env.AGENT = "1"
     process.env.OPENCODE = "1"
 
-    Log.Default.info("opencode", {
-      version: Installation.VERSION,
-      args: process.argv.slice(2),
-    })
+    if (printLogs || isLocal) {
+      Log.Default.info({
+        version: Installation.VERSION,
+        args: process.argv.slice(2),
+      }, "opencode")
+    }
   })
   .usage("\n" + UI.logo())
   .completion("completion", "generate shell completion script")
@@ -147,7 +148,7 @@ try {
   if (formatted) UI.error(formatted)
   if (formatted === undefined) {
     UI.error("Unexpected error, check log file at " + Log.file() + " for more details" + EOL)
-    console.error(e instanceof Error ? e.message : String(e))
+    Log.Default.error(e instanceof Error ? e.message : String(e))
   }
   process.exitCode = 1
 } finally {

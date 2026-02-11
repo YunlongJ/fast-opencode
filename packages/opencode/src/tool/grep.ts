@@ -8,7 +8,6 @@ import path from "path"
 import { assertExternalDirectory } from "./external-directory"
 
 const MAX_LINE_LENGTH = 2000
-const STAT_CONCURRENCY = 100 // 并发控制
 
 export const GrepTool = Tool.define("grep", {
   description: DESCRIPTION,
@@ -50,12 +49,62 @@ export const GrepTool = Tool.define("grep", {
       signal: ctx.abort,
     })
 
-    const outputText = await new Response(proc.stdout).text()
-    const errorOutput = await new Response(proc.stderr).text()
+    const SOFT_LIMIT = 200
+    const decoder = new TextDecoder()
+    const reader = proc.stdout.getReader()
+    let buffer = ""
+    let truncated = false
+
+    const rawMatches: Array<{ filePath: string; lineNum: number; lineText: string }> = []
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split(/\r?\n/)
+        buffer = lines.pop() || ""
+
+        for (const line of lines) {
+          if (!line) continue
+          const [filePath, lineNumStr, ...lineTextParts] = line.split("|")
+          if (!filePath || !lineNumStr || lineTextParts.length === 0) continue
+          rawMatches.push({
+            filePath,
+            lineNum: Number.parseInt(lineNumStr, 10),
+            lineText: lineTextParts.join("|"),
+          })
+          if (rawMatches.length >= SOFT_LIMIT) {
+            truncated = true
+            proc.kill()
+            break
+          }
+        }
+        if (truncated) break
+      }
+
+      if (!truncated && buffer) {
+        const [filePath, lineNumStr, ...lineTextParts] = buffer.split("|")
+        if (filePath && lineNumStr && lineTextParts.length > 0) {
+          rawMatches.push({
+            filePath,
+            lineNum: Number.parseInt(lineNumStr, 10),
+            lineText: lineTextParts.join("|"),
+          })
+          if (rawMatches.length >= SOFT_LIMIT) {
+            truncated = true
+            proc.kill()
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock()
+    }
+
+    const errorOutput = await new Response(proc.stderr).text().catch(() => "")
     const exitCode = await proc.exited
 
     // Exit codes: 0 = matches found, 1 = no matches, 2 = errors (but may still have matches)
-    if (exitCode === 1 || (exitCode === 2 && !outputText.trim())) {
+    if (rawMatches.length === 0 && (exitCode === 1 || exitCode === 2)) {
       return {
         title: params.pattern,
         metadata: { matches: 0, displayed: 0, truncated: false },
@@ -63,52 +112,13 @@ export const GrepTool = Tool.define("grep", {
       }
     }
 
-    if (exitCode !== 0 && exitCode !== 2) {
+    if (!truncated && exitCode !== 0 && exitCode !== 2) {
       throw new Error(`ripgrep failed: ${errorOutput}`)
     }
 
     const hasErrors = exitCode === 2
-    const lines = outputText.trim().split(/\r?\n/)
-    
-    // 解析结果
-    const rawMatches = lines
-      .map(line => {
-        if (!line) return null
-        const [filePath, lineNumStr, ...lineTextParts] = line.split("|")
-        if (!filePath || !lineNumStr || lineTextParts.length === 0) return null
-        return {
-          filePath,
-          lineNum: parseInt(lineNumStr, 10),
-          lineText: lineTextParts.join("|")
-        }
-      })
-      .filter((m): m is NonNullable<typeof m> => m !== null)
-
-    // 并发获取文件状态
-    const matches: any[] = []
-    for (let i = 0; i < rawMatches.length; i += STAT_CONCURRENCY) {
-      const batch = rawMatches.slice(i, i + STAT_CONCURRENCY)
-      const batchResults = await Promise.all(
-        batch.map(async (m) => {
-          const file = Bun.file(m.filePath)
-          const stats = await file.stat().catch(() => null)
-          if (!stats) return null
-          return {
-            ...m,
-            modTime: stats.mtime.getTime()
-          }
-        })
-      )
-      matches.push(...batchResults.filter((m): m is NonNullable<typeof m> => m !== null))
-    }
-
-    // 按修改时间降序排列
-    matches.sort((a, b) => b.modTime - a.modTime)
-
-    const totalMatches = matches.length
-    const SOFT_LIMIT = 200 // 展示上限
-    const truncated = totalMatches > SOFT_LIMIT
-    const finalMatches = matches.slice(0, SOFT_LIMIT)
+    const totalMatches = rawMatches.length
+    const finalMatches = rawMatches.slice(0, SOFT_LIMIT)
 
     if (finalMatches.length === 0) {
       return {
@@ -140,7 +150,7 @@ export const GrepTool = Tool.define("grep", {
 
     if (truncated) {
       outputLines.push("")
-      outputLines.push(`... and ${totalMatches - SOFT_LIMIT} more matches. Consider using a more specific path or pattern.`)
+      outputLines.push("... and more matches. Consider using a more specific path or pattern.")
     }
 
     if (hasErrors) {

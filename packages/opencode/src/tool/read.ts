@@ -199,6 +199,17 @@ export const ReadTool = Tool.define("read", {
     LSP.touchFile(filepath, false)
     FileTime.read(ctx.sessionID, filepath)
 
+    // 索引文件内容到 MemoryContextEngine
+    try {
+      const { MemoryContextEngine } = await import("../session/engine/context");
+      const engine = MemoryContextEngine.getInstance();
+      await engine.init();
+      // 使用 raw.join('\n') 作为索引内容，因为它是实际读取到的纯文本
+      await engine.indexFile(filepath, raw.join("\n"));
+    } catch (e) {
+      // 索引失败不应阻断工具执行
+    }
+
     if (instructions.length > 0) {
       output += `\n\n<system-reminder>\n${instructions.map((i) => i.content).join("\n\n")}\n</system-reminder>`
     }

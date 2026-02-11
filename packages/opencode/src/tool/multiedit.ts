@@ -133,6 +133,16 @@ export const MultiEditTool = Tool.define("multiedit", {
         event: "change",
       })
       FileTime.read(ctx.sessionID, filePath)
+
+      // 索引修改后的文件内容到 MemoryContextEngine
+      try {
+        const { MemoryContextEngine } = await import("../session/engine/context");
+        const engine = MemoryContextEngine.getInstance();
+        await engine.init();
+        await engine.indexFile(filePath, contentNew);
+      } catch (e) {
+        // 索引失败不应阻断工具执行
+      }
     })
 
     const filediff: Snapshot.FileDiff = {

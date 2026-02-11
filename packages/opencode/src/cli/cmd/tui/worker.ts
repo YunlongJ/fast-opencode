@@ -16,20 +16,16 @@ await Log.init({
   dev: Installation.isLocal(),
   level: (() => {
     if (Installation.isLocal()) return "DEBUG"
-    return "INFO"
+    return "ERROR"
   })(),
 })
 
 process.on("unhandledRejection", (e) => {
-  Log.Default.error("rejection", {
-    e: e instanceof Error ? e.message : e,
-  })
+  Log.Default.error({ err: e }, "rejection")
 })
 
 process.on("uncaughtException", (e) => {
-  Log.Default.error("exception", {
-    e: e instanceof Error ? e.message : e,
-  })
+  Log.Default.error({ err: e }, "exception")
 })
 
 // Subscribe to global events and forward them via RPC
@@ -88,9 +84,7 @@ const startEventStream = (directory: string) => {
       }
     }
   })().catch((error) => {
-    Log.Default.error("event stream error", {
-      error: error instanceof Error ? error.message : error,
-    })
+    Log.Default.error({ error }, "event stream error")
   })
 }
 

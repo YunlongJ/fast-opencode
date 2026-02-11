@@ -165,6 +165,17 @@ export const EditTool = Tool.define("edit", {
         event: "change",
       })
       contentNew = await file.text()
+
+      // 索引修改后的文件内容到 MemoryContextEngine
+      try {
+        const { MemoryContextEngine } = await import("../session/engine/context");
+        const engine = MemoryContextEngine.getInstance();
+        await engine.init();
+        await engine.indexFile(filePath, contentNew);
+      } catch (e) {
+        // 索引失败不应阻断工具执行
+      }
+
       diff = trimDiff(
         createTwoFilesPatch(filePath, filePath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew)),
       )

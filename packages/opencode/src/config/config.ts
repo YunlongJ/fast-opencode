@@ -1118,6 +1118,10 @@ export namespace Config {
         .object({
           disable_paste_summary: z.boolean().optional(),
           batch_tool: z.boolean().optional().describe("Enable the batch tool"),
+          skip_permissions: z
+            .boolean()
+            .optional()
+            .describe("Skip all permission prompts for maximum speed (unsafe)"),
           openTelemetry: z
             .boolean()
             .optional()
@@ -1142,54 +1146,9 @@ export namespace Config {
             .int()
             .positive()
             .optional()
-            .describe("Maximum number of tools to execute in parallel (default: 10)"),
+            .describe("Maximum number of tools to execute in parallel (default: 16)"),
         })
         .optional(),
-      checker: z
-        .object({
-          enabled: z
-            .boolean()
-            .optional()
-            .describe("Enable the checker agent for hallucination detection (default: true)"),
-          model: z
-            .string()
-            .optional()
-            .describe(
-              "Model to use for checker in format provider/model (default: same as small_model or default model)",
-            ),
-          frequency: z
-            .enum(["always", "once_per_session", "never"])
-            .optional()
-            .describe("How often to run hallucination checks"),
-          max_checks: z
-            .number()
-            .int()
-            .positive()
-            .optional()
-            .describe("Maximum number of checker runs per session (default: 10)"),
-        })
-        .optional()
-        .describe("Checker agent configuration for hallucination detection"),
-      evolution: z
-        .object({
-          enabled: z.boolean().optional().describe("Enable prompt evolution system (default: false)"),
-          model: z
-            .string()
-            .optional()
-            .describe("Model to use for evolution agent in format provider/model (default: same as checker model)"),
-          frequency: z
-            .enum(["always", "per_session", "on_failure", "never"])
-            .optional()
-            .describe("When to run prompt evolution checks"),
-          max_evolutions: z
-            .number()
-            .int()
-            .positive()
-            .optional()
-            .describe("Maximum number of evolutions per session (default: 5)"),
-        })
-        .optional()
-        .describe("Prompt evolution configuration for automatic prompt optimization"),
     })
     .strict()
     .meta({
