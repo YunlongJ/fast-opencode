@@ -10,7 +10,7 @@ import { Session } from "."
 import { Agent } from "../agent/agent"
 import { Provider } from "../provider/provider"
 import { type Tool as AITool, tool, jsonSchema, type ToolCallOptions } from "ai"
-import { SessionCompaction } from "./compaction"
+import { CompactionService } from "./engine/compaction-service"
 import { Instance } from "../project/instance"
 import { MCP } from "../mcp"
 import { Bus } from "../bus"
@@ -429,7 +429,7 @@ export namespace SessionPrompt {
 
       // pending compaction
       if (task?.type === "compaction") {
-        const result = await SessionCompaction.process({
+        const result = await CompactionService.process({
           messages: msgs,
           parentID: lastUser.id,
           abort,
@@ -444,9 +444,9 @@ export namespace SessionPrompt {
       if (
         lastFinished &&
         lastFinished.summary !== true &&
-        (await SessionCompaction.isOverflow({ tokens: lastFinished.tokens, model }))
+        (await CompactionService.isOverflow({ tokens: lastFinished.tokens, model }))
       ) {
-        await SessionCompaction.create({
+        await CompactionService.create({
           sessionID,
           agent: lastUser.agent,
           model: lastUser.model,
@@ -581,7 +581,7 @@ export namespace SessionPrompt {
       })
       if (result === "stop") break
       if (result === "compact") {
-        await SessionCompaction.create({
+        await CompactionService.create({
           sessionID,
           agent: lastUser.agent,
           model: lastUser.model,
@@ -590,7 +590,7 @@ export namespace SessionPrompt {
       }
       continue
     }
-    SessionCompaction.prune({ sessionID })
+    CompactionService.prune({ sessionID })
     for await (const item of MessageV2.stream(sessionID)) {
       if (item.info.role === "user") continue
       const queued = state()[sessionID]?.callbacks ?? []

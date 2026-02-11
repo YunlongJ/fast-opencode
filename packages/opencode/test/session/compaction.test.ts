@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import path from "path"
-import { SessionCompaction } from "../../src/session/compaction"
+import { CompactionService } from "../../src/session/engine/compaction-service"
 import { Token } from "../../src/util/token"
 import { Instance } from "../../src/project/instance"
 import { Log } from "../../src/util/log"
@@ -47,7 +47,7 @@ describe("session.compaction.isOverflow", () => {
       fn: async () => {
         const model = createModel({ context: 100_000, output: 32_000 })
         const tokens = { input: 75_000, output: 5_000, reasoning: 0, cache: { read: 0, write: 0 } }
-        expect(await SessionCompaction.isOverflow({ tokens, model })).toBe(true)
+        expect(await CompactionService.isOverflow({ tokens, model })).toBe(true)
       },
     })
   })
@@ -59,7 +59,7 @@ describe("session.compaction.isOverflow", () => {
       fn: async () => {
         const model = createModel({ context: 200_000, output: 32_000 })
         const tokens = { input: 100_000, output: 10_000, reasoning: 0, cache: { read: 0, write: 0 } }
-        expect(await SessionCompaction.isOverflow({ tokens, model })).toBe(false)
+        expect(await CompactionService.isOverflow({ tokens, model })).toBe(false)
       },
     })
   })
@@ -71,7 +71,7 @@ describe("session.compaction.isOverflow", () => {
       fn: async () => {
         const model = createModel({ context: 100_000, output: 32_000 })
         const tokens = { input: 50_000, output: 10_000, reasoning: 0, cache: { read: 10_000, write: 0 } }
-        expect(await SessionCompaction.isOverflow({ tokens, model })).toBe(true)
+        expect(await CompactionService.isOverflow({ tokens, model })).toBe(true)
       },
     })
   })
@@ -83,7 +83,7 @@ describe("session.compaction.isOverflow", () => {
       fn: async () => {
         const model = createModel({ context: 400_000, input: 272_000, output: 128_000 })
         const tokens = { input: 271_000, output: 1_000, reasoning: 0, cache: { read: 2_000, write: 0 } }
-        expect(await SessionCompaction.isOverflow({ tokens, model })).toBe(true)
+        expect(await CompactionService.isOverflow({ tokens, model })).toBe(true)
       },
     })
   })
@@ -95,7 +95,7 @@ describe("session.compaction.isOverflow", () => {
       fn: async () => {
         const model = createModel({ context: 400_000, input: 272_000, output: 128_000 })
         const tokens = { input: 200_000, output: 20_000, reasoning: 0, cache: { read: 10_000, write: 0 } }
-        expect(await SessionCompaction.isOverflow({ tokens, model })).toBe(false)
+        expect(await CompactionService.isOverflow({ tokens, model })).toBe(false)
       },
     })
   })
@@ -107,7 +107,7 @@ describe("session.compaction.isOverflow", () => {
       fn: async () => {
         const model = createModel({ context: 200_000, input: 120_000, output: 10_000 })
         const tokens = { input: 50_000, output: 9_999, reasoning: 0, cache: { read: 0, write: 0 } }
-        expect(await SessionCompaction.isOverflow({ tokens, model })).toBe(false)
+        expect(await CompactionService.isOverflow({ tokens, model })).toBe(false)
       },
     })
   })
@@ -119,7 +119,7 @@ describe("session.compaction.isOverflow", () => {
       fn: async () => {
         const model = createModel({ context: 0, output: 32_000 })
         const tokens = { input: 100_000, output: 10_000, reasoning: 0, cache: { read: 0, write: 0 } }
-        expect(await SessionCompaction.isOverflow({ tokens, model })).toBe(false)
+        expect(await CompactionService.isOverflow({ tokens, model })).toBe(false)
       },
     })
   })
@@ -140,7 +140,7 @@ describe("session.compaction.isOverflow", () => {
       fn: async () => {
         const model = createModel({ context: 100_000, output: 32_000 })
         const tokens = { input: 75_000, output: 5_000, reasoning: 0, cache: { read: 0, write: 0 } }
-        expect(await SessionCompaction.isOverflow({ tokens, model })).toBe(false)
+        expect(await CompactionService.isOverflow({ tokens, model })).toBe(false)
       },
     })
   })

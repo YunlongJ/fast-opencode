@@ -4,7 +4,7 @@ import { LLM } from "@/session/llm"
 import { MessageV2 } from "@/session/message-v2"
 import { Plugin } from "@/plugin"
 import { Session } from "@/session"
-import { SessionCompaction } from "@/session/compaction"
+import { CompactionService } from "./compaction-service"
 import { SessionStatus } from "@/session/status"
 import { Snapshot } from "@/snapshot"
 import { SessionSummary } from "@/session/summary"
@@ -95,37 +95,39 @@ export class StepEngine {
 
     try {
       for (let toolStep = 0; toolStep < maxToolSteps; toolStep++) {
-        // --- 上下文治理 (Governance) ---
-        llmMessages = await governor.govern(llmMessages);
-      
-      const stepExecutors: EngineToolExecutor[] = []
-      const toolsForLLM = this.input.parallelEnabled ? this.deps.stripExecute(streamInput.tools) : streamInput.tools
-
-      // --- 极致上下文注入 (In-Memory Context Injection) ---
-      if (!contextInjected) {
-        const lastMessageIndex = llmMessages.length - 1;
-        const lastMessage = llmMessages[lastMessageIndex];
-        if (lastMessage && lastMessage.role === "user") {
-          const query = typeof lastMessage.content === "string" ? lastMessage.content : "";
-          if (query) {
-            const engine = MemoryContextEngine.getInstance();
-            await engine.init(); // 确保引擎已初始化
-            const relevantSnippets = await engine.search(query, 3);
-            contextInjected = true; // 标记已尝试注入，避免重复搜索
-            if (relevantSnippets.length > 0) {
-              const contextPrompt = `\n\n[Memory Context Engine]: 检索到相关代码片段，请参考：\n${relevantSnippets.join("\n---\n")}`;
-              if (typeof lastMessage.content === "string") {
-                const newLastMessage = {
-                  ...lastMessage,
-                  content: lastMessage.content + contextPrompt
-                };
-                llmMessages = [...llmMessages.slice(0, lastMessageIndex), newLastMessage];
+        // --- 极致上下文注入 (In-Memory Context Injection) ---
+        // 在治理之前先尝试注入上下文，这样治理器可以根据注入后的完整内容进行评估
+        if (!contextInjected) {
+          const lastUserIdx = llmMessages.findLastIndex(m => m.role === "user");
+          if (lastUserIdx !== -1) {
+            const lastMessage = llmMessages[lastUserIdx];
+            const query = typeof lastMessage.content === "string" ? lastMessage.content : "";
+            if (query) {
+              const engine = MemoryContextEngine.getInstance();
+              await engine.init();
+              const relevantSnippets = await engine.search(query, 3);
+              contextInjected = true; 
+              if (relevantSnippets.length > 0) {
+                const contextPrompt = `\n\n[Memory Context Engine]: 检索到相关代码片段，请参考：\n${relevantSnippets.join("\n---\n")}`;
+                if (typeof lastMessage.content === "string") {
+                  llmMessages[lastUserIdx] = {
+                    ...lastMessage,
+                    content: lastMessage.content + contextPrompt
+                  } as ModelMessage;
+                }
               }
             }
           }
         }
-      }
-      // --------------------------------------------------
+
+        // --- 上下文治理 (Governance) ---
+        // 传入当前最后一条用户消息作为 queryHint，辅助 QMD 蒸馏决策
+        const lastUserMessage = llmMessages.findLast(m => m.role === "user");
+        const queryHint = typeof lastUserMessage?.content === "string" ? lastUserMessage.content : undefined;
+        llmMessages = await governor.govern(llmMessages, queryHint);
+      
+      const stepExecutors: EngineToolExecutor[] = []
+      const toolsForLLM = this.deps.stripExecute(streamInput.tools)
 
       const stream = await LLM.stream({
         ...streamInput,
@@ -325,7 +327,7 @@ export class StepEngine {
               this.deps.snapshot.value = undefined
             }
             SessionSummary.summarize({ sessionID: this.input.sessionID, messageID: this.input.assistantMessage.parentID })
-            if (await SessionCompaction.isOverflow({ tokens: usage.tokens, model: this.input.model })) {
+            if (await CompactionService.isOverflow({ tokens: usage.tokens, model: this.input.model })) {
               needsCompaction = true
             }
             break
