@@ -8,6 +8,7 @@ import PROMPT_BEAST from "./prompt/beast.txt"
 import PROMPT_GEMINI from "./prompt/gemini.txt"
 
 import PROMPT_CODEX from "./prompt/codex_header.txt"
+import PROMPT_MEMORY_MARKERS from "../agent/prompt/memory-markers.txt"
 import type { Provider } from "@/provider/provider"
 
 export namespace SystemPrompt {
@@ -16,12 +17,18 @@ export namespace SystemPrompt {
   }
 
   export function provider(model: Provider.Model) {
-    if (model.api.id.includes("gpt-5")) return [PROMPT_CODEX]
-    if (model.api.id.includes("gpt-") || model.api.id.includes("o1") || model.api.id.includes("o3"))
-      return [PROMPT_BEAST]
-    if (model.api.id.includes("gemini-")) return [PROMPT_GEMINI]
-    if (model.api.id.includes("claude")) return [PROMPT_ANTHROPIC]
-    return [PROMPT_ANTHROPIC_WITHOUT_TODO]
+    const prompts = []
+
+    // Add memory markers prompt for all models
+    prompts.push(PROMPT_MEMORY_MARKERS)
+
+    if (model.api.id.includes("gpt-5")) prompts.push(PROMPT_CODEX)
+    else if (model.api.id.includes("gpt-") || model.api.id.includes("o1") || model.api.id.includes("o3"))
+      prompts.push(PROMPT_BEAST)
+    else if (model.api.id.includes("gemini-")) prompts.push(PROMPT_GEMINI)
+    else prompts.push(PROMPT_ANTHROPIC_WITHOUT_TODO)
+
+    return prompts
   }
 
   export async function environment(model: Provider.Model) {

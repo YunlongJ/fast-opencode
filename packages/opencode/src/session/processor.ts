@@ -15,9 +15,13 @@ import { BackgroundTaskHandler, type WorkQueueIntegrationConfig } from "./work-q
 import { StreamRenderer } from "./engine/stream-renderer"
 import { ToolBlackboard } from "./engine/tool-blackboard"
 import { StepEngine } from "./engine/step-engine"
-import { ToolOrchestrator, createResourceLockManager as createEngineResourceLockManager, createToolExecutor as createEngineToolExecutor } from "./engine/tool-orchestrator"
+import {
+  ToolOrchestrator,
+  createResourceLockManager as createEngineResourceLockManager,
+  createToolExecutor as createEngineToolExecutor,
+} from "./engine/tool-orchestrator"
 import { MemoryContextEngine } from "./engine/context"
-import { CompactionGovernor } from "./processor/compaction-governor"
+import { CompactionService } from "./engine/compaction-service"
 
 /**
  * SessionProcessor 负责处理会话的核心逻辑，包括工具调度、上下文管理和步骤执行。
@@ -44,8 +48,9 @@ export namespace SessionProcessor {
     let blocked = false
     let attempt = 0
     let needsCompaction = false
+    let compactionAttemptCount = 0
+    const MAX_COMPACTION_ATTEMPTS = 3
     let backgroundHandler: BackgroundTaskHandler | null = null
-    const compactionGovernor = new CompactionGovernor(input.sessionID, input.model)
 
     const result = {
       get message() {
@@ -60,22 +65,24 @@ export namespace SessionProcessor {
        * @returns 处理结果状态 ("continue" | "stop" | "compact")
        * @throws 可能会抛出 LLM 调用或工具执行相关的异常，由内部 try-catch 统一处理并进行重试。
        */
-      async process(streamInput: LLM.StreamInput) {
+      async process(
+        streamInput: LLM.StreamInput,
+      ): Promise<"continue" | "stop" | "compact" | { status: "error"; error: string; needsCompaction: boolean }> {
         log.info("process", { sessionID: input.sessionID })
         needsCompaction = false
         const blackboard = new ToolBlackboard()
 
         // --- 极致上下文引擎初始化 (FlexSearch + Tree-sitter) ---
         // @VertxThreadSafety: MemoryContextEngine 内部管理单例和并发索引
-        const contextEngine = MemoryContextEngine.getInstance();
+        const contextEngine = MemoryContextEngine.getInstance()
         try {
-          await contextEngine.init();
+          await contextEngine.init()
           // 触发工作区索引 (后台异步执行，不阻塞主流程)
-          contextEngine.indexWorkspace().catch(err => {
-            log.error({ err }, "Background workspace indexing failed");
-          });
+          contextEngine.indexWorkspace().catch((err) => {
+            log.error({ err }, "Background workspace indexing failed")
+          })
         } catch (err) {
-          log.error({ err }, "Failed to initialize MemoryContextEngine");
+          log.error({ err }, "Failed to initialize MemoryContextEngine")
         }
 
         const config = await Config.get()
@@ -90,7 +97,7 @@ export namespace SessionProcessor {
         let toolErrorCount = 0
         let toolDurationSum = 0
         let toolAdjustAt = Date.now()
-        
+
         const limiter = (() => {
           let active = 0
           const queue: Array<() => void> = []
@@ -187,7 +194,7 @@ export namespace SessionProcessor {
         )
 
         const snapshotRef = { value: snapshot as string | undefined }
-        
+
         const stepEngine = new StepEngine(
           {
             sessionID: input.sessionID,
@@ -224,23 +231,53 @@ export namespace SessionProcessor {
 
             // --- 动态上下文治理评估 ---
             // 根据当前 token 使用情况，评估是否需要执行压缩策略
-            const compactionStatus = await compactionGovernor.evaluate(input.assistantMessage.tokens);
-            if (compactionStatus.needsCompaction) {
-              log.info("Compaction recommended", { 
-                strategy: compactionStatus.strategy, 
-                usageRatio: compactionStatus.usageRatio.toFixed(2) 
-              });
-              
-              // 获取当前查询提示以辅助压缩策略决策（语义相关性评分）
-              const queryHint = typeof streamInput.messages.findLast(m => m.role === "user")?.content === "string" 
-                ? (streamInput.messages.findLast(m => m.role === "user")?.content as string) 
-                : undefined;
+            const tokenCount =
+              input.assistantMessage.tokens.input +
+              input.assistantMessage.tokens.cache.read +
+              input.assistantMessage.tokens.output
 
-              needsCompaction = await compactionGovernor.executeStrategy(compactionStatus, queryHint);
-              if (needsCompaction) {
-                // 如果执行了全量压缩策略，立即中断当前循环并返回 "compact" 状态
-                log.warn("Full compaction triggered, restarting processor loop", { sessionID: input.sessionID });
-                return "compact";
+            const outputLimit = Math.min(input.model.limit.output, 4096)
+            const usableContext = input.model.limit.context - outputLimit
+
+            // 避免除以零
+            if (usableContext <= 0) {
+              log.warn("Invalid context limit", {
+                context: input.model.limit.context,
+                output: input.model.limit.output,
+              })
+            } else {
+              const usageRatio = tokenCount / usableContext
+
+              if (usageRatio > 0.95) {
+                compactionAttemptCount++
+
+                if (compactionAttemptCount > MAX_COMPACTION_ATTEMPTS) {
+                  log.error("Max compaction attempts reached, forcing continue", {
+                    sessionID: input.sessionID,
+                    attempts: compactionAttemptCount,
+                    usageRatio: usageRatio.toFixed(2),
+                  })
+                  // Force continue to break the infinite loop
+                  // This is a safety measure to prevent session lock
+                  needsCompaction = false
+                  return "continue"
+                }
+
+                log.warn("Full compaction triggered", {
+                  sessionID: input.sessionID,
+                  usageRatio: usageRatio.toFixed(2),
+                  attempt: compactionAttemptCount,
+                })
+                needsCompaction = true
+                return "compact"
+              } else if (usageRatio > 0.85) {
+                log.info("Pruning recommended", { usageRatio: usageRatio.toFixed(2) })
+                try {
+                  await CompactionService.prune({ sessionID: input.sessionID })
+                } catch (pruneError) {
+                  log.error("Pruning failed", { error: pruneError, sessionID: input.sessionID })
+                  // Continue even if pruning fails, don't block the session
+                }
               }
             }
 
