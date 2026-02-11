@@ -3,6 +3,7 @@ import fs from "fs/promises"
 import { Global } from "../global"
 import z from "zod"
 import pino, { type Logger as PinoLogger } from "pino"
+import pretty from "pino-pretty"
 import os from "os"
 
 export namespace Log {
@@ -11,47 +12,29 @@ export namespace Log {
 
   /** 敏感信息脱敏配置 */
   const REDACT_KEYS = [
-    "token",
-    "key",
-    "secret",
-    "password",
-    "authorization",
-    "apiKey",
-    "set-cookie",
-    "cookie",
-    "access_token",
-    "refresh_token",
+    "token", "**.token",
+    "key", "**.key",
+    "secret", "**.secret",
+    "password", "**.password",
+    "pass", "**.pass",
+    "authorization", "**.authorization",
+    "apiKey", "**.apiKey",
+    "access_token", "**.access_token",
+    "refresh_token", "**.refresh_token",
+    "cookie", "**.cookie",
+    "set-cookie", "**.set-cookie",
+    "credentials", "**.credentials",
+    "private_key", "**.private_key",
+    "cert", "**.cert",
   ]
 
   let currentLevel: Level = "INFO"
   
   /** 
-   * 暴露 Pino 原生 Logger 类型
    * 默认级别设为 silent，直到 init 被调用
    */
-  export let Default: PinoLogger = createRootLogger({ level: "silent" })
-  let rootDestination: pino.DestinationStream | undefined
-
-  function createRootLogger(options: pino.LoggerOptions, destination?: pino.DestinationStream): PinoLogger {
-    const isProd = process.env.NODE_ENV === "production" || !process.env.DEV
-    return pino({
-      // 生产环境保留 pid 和 hostname，方便在多实例/容器环境中追踪
-      base: isProd ? { pid: process.pid, hostname: os.hostname() } : undefined,
-      timestamp: pino.stdTimeFunctions.isoTime,
-      serializers: {
-        err: pino.stdSerializers.err,
-        error: pino.stdSerializers.err,
-        // 增加对请求和响应的序列化支持，防止打印大对象
-        req: pino.stdSerializers.req,
-        res: pino.stdSerializers.res,
-      },
-      redact: {
-        paths: REDACT_KEYS,
-        censor: "***",
-      },
-      ...options,
-    }, destination)
-  }
+  export let Default: PinoLogger = pino({ level: "silent" })
+  let rootDestination: any | undefined
 
   export interface Options {
     print: boolean
@@ -72,55 +55,95 @@ export namespace Log {
     
     const pinoLevel = currentLevel.toLowerCase()
     
-    if (options.print) {
-      Default = createRootLogger({
-        level: pinoLevel,
-        transport: {
-          target: "pino-pretty",
-          options: {
-            colorize: true,
-            ignore: "pid,hostname",
-            translateTime: "SYS:standard",
-          }
-        }
-      })
-    } else {
-      const logDir = Global.Path.log
+    // 初始化日志目录
+    const logDir = Global.Path.log
+    try {
       if (!(await fs.stat(logDir).catch(() => null))) {
         await fs.mkdir(logDir, { recursive: true })
       }
-      logpath = path.join(
-        logDir,
-        options.dev ? "dev.log" : new Date().toISOString().split(".")[0].replace(/:/g, "") + ".log",
-      )
-      // 如果 options.async 为 true，则开启异步写入，提高吞吐量
-      rootDestination = pino.destination({ dest: logpath, sync: !options.async })
-      Default = createRootLogger(
-        { level: pinoLevel },
-        rootDestination
-      )
-
-      // 在设置好 logpath 并初始化好目录后再执行清理，避免误删当前文件或目录不存在报错
-      await cleanup(logDir)
+    } catch (e) {
+      console.error("Failed to create log directory:", e)
     }
+
+    const now = new Date()
+    const timestamp = options.dev 
+      ? "dev" 
+      : `${now.getFullYear()}-${(now.getMonth() + 1).toString().padStart(2, "0")}-${now.getDate().toString().padStart(2, "0")}-${now.getHours().toString().padStart(2, "0")}`
+    
+    logpath = path.join(logDir, `${timestamp}.log`)
+
+    // 如果已经存在旧的 destination，先关闭它
+    if (rootDestination && typeof rootDestination.end === "function") {
+      rootDestination.end()
+    }
+
+    // 如果 options.async 为 true，则开启异步写入，提高吞吐量
+    rootDestination = pino.destination({ dest: logpath, sync: !options.async })
+    
+    const streams: pino.StreamEntry[] = [
+      // 所有日志都写入文件
+      { stream: rootDestination, level: pinoLevel as pino.Level },
+    ]
+
+    // 只有在明确要求打印日志时，才添加终端输出流
+    if (options.print) {
+      streams.push({
+        stream: pretty({
+          destination: process.stderr,
+          colorize: true,
+          ignore: "pid,hostname",
+          translateTime: "SYS:standard",
+        }),
+        level: pinoLevel as pino.Level,
+      })
+    }
+
+    // 创建全局 Logger，使用 multistream 确保多路输出
+    Default = pino(
+      {
+        base: (process.env.NODE_ENV === "production" || !process.env.DEV) ? { pid: process.pid, hostname: os.hostname() } : undefined,
+        timestamp: pino.stdTimeFunctions.isoTime,
+        serializers: {
+          err: pino.stdSerializers.err,
+          error: pino.stdSerializers.err,
+          req: pino.stdSerializers.req,
+          res: pino.stdSerializers.res,
+        },
+        redact: {
+          paths: REDACT_KEYS,
+          censor: "***",
+        },
+        level: pinoLevel,
+      },
+      pino.multistream(streams)
+    )
+
+    // 在设置好 logpath 并初始化好目录后再执行清理，避免误删当前文件或目录不存在报错
+    await cleanup(logDir)
 
     // 进程退出时确保日志刷入磁盘（确保只注册一次）
     if (!exitHandlerRegistered) {
       const flush = () => {
-        Default.flush()
+        // 使用 flushSync 确保在退出前同步写入磁盘
+        if (rootDestination && "flushSync" in rootDestination) {
+          (rootDestination as any).flushSync()
+        }
         if (rootDestination && "end" in rootDestination) {
           (rootDestination as any).end()
         }
       }
+      
       process.on("exit", flush)
-      process.on("SIGINT", () => {
+      
+      // 捕捉中断信号，手动调用 exit 触发 exit 事件
+      const handleSignal = () => {
         flush()
         process.exit(0)
-      })
-      process.on("SIGTERM", () => {
-        flush()
-        process.exit(0)
-      })
+      }
+      
+      process.on("SIGINT", handleSignal)
+      process.on("SIGTERM", handleSignal)
+      
       exitHandlerRegistered = true
     }
   }
@@ -130,6 +153,8 @@ export namespace Log {
     const MAX_AGE_DAYS = 7
     const msPerDay = 24 * 60 * 60 * 1000
     const now = Date.now()
+
+    if (!logpath) return
 
     try {
       const glob = new Bun.Glob("*.log")
@@ -148,7 +173,13 @@ export namespace Log {
       // 获取文件详情并过滤掉当前正在使用的日志
       const files = await Promise.all(
         matches
-          .filter((file) => path.resolve(file) !== normalizedLogPath)
+          .filter((file) => {
+            try {
+              return path.resolve(file) !== normalizedLogPath
+            } catch {
+              return false
+            }
+          })
           .map(async (file) => {
             const stats = await fs.stat(file).catch(() => null)
             return { file, mtime: stats?.mtimeMs ?? 0 }
@@ -186,19 +217,23 @@ export namespace Log {
 
   /** 兼容旧的 create 接口，但直接返回 Pino child logger */
   export function create(tags?: Record<string, any>): Logger {
-    // 使用 Proxy 包装 child logger，确保如果 Default 在 init 后被替换，已创建的 logger 依然有效
-    // 实际上，更简单的方法是让 create 总是基于当前的 Default
-    const getTarget = () => Default.child(tags || {}) as any
+    let currentParent: PinoLogger | undefined
+    let cachedChild: any
 
-    const logger = getTarget()
+    const getLogger = () => {
+      if (Default !== currentParent) {
+        currentParent = Default
+        cachedChild = currentParent.child(tags || {})
+      }
+      return cachedChild
+    }
 
-    logger.time = (msg: string, metadata?: any) => {
+    const time = (msg: string, metadata?: any) => {
       const start = performance.now()
       const stop = () => {
         const duration = performance.now() - start
-        // 总是获取最新的 Default 发送日志
-        const currentLogger = tags ? Default.child(tags) : Default
-        currentLogger.info({ ...metadata, duration: `${duration.toFixed(2)}ms` }, msg)
+        const activeLogger = getLogger()
+        activeLogger.info({ ...metadata, duration: `${duration.toFixed(2)}ms` }, msg)
       }
       return {
         stop,
@@ -206,45 +241,36 @@ export namespace Log {
       }
     }
 
-    logger.clone = () => {
-      return create(tags)
-    }
+    const clone = () => create(tags)
+    const tag = (key: string, value: any) => create({ ...tags, [key]: value })
 
-    logger.tag = (key: string, value: any) => {
-      return create({ ...tags, [key]: value })
-    }
+    // 初始获取一次
+    const initialLogger = getLogger()
 
-    // 关键：为了处理 Default 被重新赋值的情况（init 调用后）
-    // 我们返回一个代理对象，它的大部分方法都会委托给最新的 Default.child(tags)
-    return new Proxy(logger, {
+    return new Proxy(initialLogger, {
       get(target, prop, receiver) {
-        // 如果是特殊扩展的方法，直接返回
-        if (prop === "time" || prop === "clone" || prop === "tag") {
-          return target[prop]
+        if (prop === "time") return time
+        if (prop === "clone") return clone
+        if (prop === "tag") return tag
+        
+        const activeLogger = getLogger()
+        const val = activeLogger[prop]
+        if (typeof val === "function") {
+          return val.bind(activeLogger)
         }
-        // 对于标准 pino 方法（info, error 等），确保使用最新的 Default
-        const currentDefault = Default
-        if (typeof (currentDefault as any)[prop] === "function") {
-          const currentChild = currentDefault.child(tags || {})
-          const val = (currentChild as any)[prop]
-          if (typeof val === "function") {
-            return val.bind(currentChild)
-          }
-          return val
-        }
-        return Reflect.get(target, prop, receiver)
+        return val
       }
     })
   }
 
   /** 兼容旧的 time 接口 */
   export function time(logger: PinoLogger, message: string, extra?: Record<string, any>) {
-    const now = Date.now()
+    const start = performance.now()
     logger.info(extra || {}, `${message} (started)`)
     const stop = () => {
       logger.info({
         ...extra,
-        duration: Date.now() - now,
+        duration: `${(performance.now() - start).toFixed(2)}ms`,
       }, `${message} (completed)`)
     }
     return {
