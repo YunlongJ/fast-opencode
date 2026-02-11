@@ -10,6 +10,11 @@ import type { Tool } from "ai"
 import { WriteOnceGuard } from "./write-once-guard"
 import { Instance } from "@/project/instance"
 import path from "path"
+import { smartBatchProcessor, canUseFastPath } from "./smart-batch"
+import { toolResultSmartCache } from "./smart-cache"
+import { smartExecutor } from "./smart-executor"
+import { concurrencyController } from "./concurrency-controller"
+import { TaskPriority } from "./types"
 
 const log = Log.create({ service: "session.tool-orchestrator" })
 
@@ -35,7 +40,12 @@ export type ToolExecutor = {
   partId: string
   callId: string
   abort: AbortSignal
-  execute(ctx: { sessionID: string; assistantMessage: MessageV2.Assistant; agent: Agent.Info; tools: Record<string, Tool> }): Promise<ToolExecutionResult>
+  execute(ctx: {
+    sessionID: string
+    assistantMessage: MessageV2.Assistant
+    agent: Agent.Info
+    tools: Record<string, Tool>
+  }): Promise<ToolExecutionResult>
   getTimeout(): number
   getResourceKeys(): Set<string>
   getDependencies(): string[]
@@ -51,7 +61,13 @@ export type Limiter = {
 export type ResourceLockManager = { acquire(keys: Set<string>, mode: ResourceLockMode): Promise<() => void> }
 
 export function toolLockMode(toolName: string): ResourceLockMode {
-  if (toolName === "read" || toolName === "read_multiple" || toolName === "grep" || toolName === "list" || toolName === "glob")
+  if (
+    toolName === "read" ||
+    toolName === "read_multiple" ||
+    toolName === "grep" ||
+    toolName === "list" ||
+    toolName === "glob"
+  )
     return "shared"
   return "exclusive"
 }
@@ -203,7 +219,11 @@ export class ToolOrchestrator {
   constructor(
     private input: { sessionID: string; assistantMessage: MessageV2.Assistant; agent: Agent.Info },
     private tools: Record<string, Tool>,
-    private shared: { limiter: Limiter; resourceLockManager: ResourceLockManager; onToolExecuted?: (r: ToolExecutionResult, e: ToolExecutor) => void },
+    private shared: {
+      limiter: Limiter
+      resourceLockManager: ResourceLockManager
+      onToolExecuted?: (r: ToolExecutionResult, e: ToolExecutor) => void
+    },
   ) {}
 
   clear() {
@@ -212,6 +232,24 @@ export class ToolOrchestrator {
 
   async execute(executors: ToolExecutor[]): Promise<ToolExecutionResult[]> {
     if (executors.length === 0) return []
+
+    const startTime = Date.now()
+    log.debug("Starting optimized tool execution", {
+      count: executors.length,
+      tools: executors.map((e) => e.toolName),
+    })
+
+    // 1. 智能预加载和预测
+    const { predictions, preloaded } = await smartExecutor.prepare(this.input.sessionID, executors)
+    log.debug("Predictions", { predictions: predictions.map((p) => p.toolName), preloaded })
+
+    // 2. 智能批处理分析
+    const { batches, singles } = smartBatchProcessor.createExecutionPlan(executors)
+    log.debug("Batch analysis", {
+      batchCount: batches.length,
+      singleCount: singles.length,
+      batchTypes: batches.map((b) => b.type),
+    })
 
     const toolNameAndInputKey = (e: ToolExecutor) => `${e.toolName}:${JSON.stringify(e.input)}`
     const duplicateOf = new Map<string, string>()
@@ -251,61 +289,92 @@ export class ToolOrchestrator {
     })
     const runningPromises = new Set<Promise<void>>()
 
+    // 3. 优化的批处理执行
+    const executeBatch = async (batchExecutors: ToolExecutor[]) => {
+      if (canUseFastPath(batchExecutors)) {
+        // 快速路径：使用 read_multiple 批量读取
+        await this.executeReadMultipleBatch(batchExecutors, results)
+      } else {
+        // 使用增强并发控制器批量执行
+        const tasks = batchExecutors.map((e) => ({
+          id: e.callId,
+          toolType: e.toolName,
+          fn: () => this.executeSingleTool(e, duplicateOf, completed, results),
+          priority: this.getToolPriority(e.toolName),
+        }))
+
+        const batchResults = await concurrencyController.runBatch(tasks)
+        for (const [callId, result] of batchResults) {
+          if (result.success && result.result) {
+            results.set(callId, result.result)
+          } else {
+            results.set(callId, {
+              ok: false,
+              durationMs: 0,
+              toolCallId: callId,
+              toolName: executorById.get(callId)?.toolName || "unknown",
+              input: executorById.get(callId)?.input || {},
+              error: result.error?.message || "Batch execution failed",
+            })
+          }
+        }
+      }
+    }
+
     const kick = () => {
       while (readyQueue.length > 0) {
-        if (this.canBatchRead(readyQueue, pending, executorById)) {
-          const batchIds: string[] = []
-          for (const id of readyQueue) {
-            if (batchIds.length >= 50) break
-            if (!pending.has(id)) continue
-            const e = executorById.get(id)
-            if (!e) continue
-            if (e.toolName !== "read") continue
-            batchIds.push(id)
-          }
-          if (batchIds.length >= 2) {
-            const batchIdSet = new Set(batchIds)
-            for (const id of batchIds) pending.delete(id)
-            for (let i = readyQueue.length - 1; i >= 0; i--) {
-              const id = readyQueue[i]!
-              if (batchIdSet.has(id)) readyQueue.splice(i, 1)
-            }
+        // 优先处理批处理
+        const readyReads = readyQueue.filter((id) => {
+          if (!pending.has(id)) return false
+          const e = executorById.get(id)
+          return e?.toolName === "read"
+        })
 
-            const p = (async () => {
-              const readExecutors: ToolExecutor[] = batchIds.map((id) => executorById.get(id)!).filter(Boolean)
-              await this.executeReadMultipleBatch(readExecutors, results)
-              for (const id of batchIds) {
-                completed.add(id)
-                const nexts = dependents.get(id)
-                if (nexts) {
-                  for (const depId of nexts) {
-                    const deps = remainingDeps.get(depId)
-                    if (!deps) continue
-                    deps.delete(id)
-                    if (deps.size === 0) readyQueue.push(depId)
-                  }
+        if (readyReads.length >= 2) {
+          const batchSize = Math.min(readyReads.length, 50)
+          const batchIds = readyReads.slice(0, batchSize)
+          const batchIdSet = new Set(batchIds)
+
+          for (const id of batchIds) pending.delete(id)
+          for (let i = readyQueue.length - 1; i >= 0; i--) {
+            const id = readyQueue[i]!
+            if (batchIdSet.has(id)) readyQueue.splice(i, 1)
+          }
+
+          const p = (async () => {
+            const readExecutors: ToolExecutor[] = batchIds.map((id) => executorById.get(id)!).filter(Boolean)
+            await executeBatch(readExecutors)
+            for (const id of batchIds) {
+              completed.add(id)
+              const nexts = dependents.get(id)
+              if (nexts) {
+                for (const depId of nexts) {
+                  const deps = remainingDeps.get(depId)
+                  if (!deps) continue
+                  deps.delete(id)
+                  if (deps.size === 0) readyQueue.push(depId)
                 }
               }
-            })()
-            runningPromises.add(p)
-            p.finally(() => {
-              runningPromises.delete(p)
-              if (completed.size >= executors.length) {
-                resolveDone?.()
-                return
-              }
-              if (runningPromises.size === 0 && readyQueue.length === 0 && pending.size > 0) {
-                log.error("Deadlock detected in tool dependencies", {
-                  pending: Array.from(pending),
-                  completed: Array.from(completed),
-                })
-                resolveDone?.()
-                return
-              }
-              kick()
-            })
-            continue
-          }
+            }
+          })()
+          runningPromises.add(p)
+          p.finally(() => {
+            runningPromises.delete(p)
+            if (completed.size >= executors.length) {
+              resolveDone?.()
+              return
+            }
+            if (runningPromises.size === 0 && readyQueue.length === 0 && pending.size > 0) {
+              log.error("Deadlock detected in tool dependencies", {
+                pending: Array.from(pending),
+                completed: Array.from(completed),
+              })
+              resolveDone?.()
+              return
+            }
+            kick()
+          })
+          continue
         }
 
         const id = readyQueue.shift()
@@ -399,7 +468,10 @@ export class ToolOrchestrator {
                 let result: ToolExecutionResult
                 if (timeout > 0) {
                   const timeoutPromise = new Promise<ToolExecutionResult>((_, reject) =>
-                    setTimeout(() => reject(new Error(`Tool ${executor.toolName} timed out after ${timeout}ms`)), timeout),
+                    setTimeout(
+                      () => reject(new Error(`Tool ${executor.toolName} timed out after ${timeout}ms`)),
+                      timeout,
+                    ),
                   )
                   result = await Promise.race([resultPromise, timeoutPromise])
                 } else {
@@ -470,6 +542,17 @@ export class ToolOrchestrator {
     kick()
     await done
 
+    const totalDuration = Date.now() - startTime
+    const successCount = Array.from(results.values()).filter((r) => r.ok).length
+    log.debug("Tool execution completed", {
+      totalDuration,
+      successCount,
+      failedCount: results.size - successCount,
+      totalCount: executors.length,
+      cacheStats: toolResultSmartCache.getStats(),
+      concurrencyStats: concurrencyController.getStats(),
+    })
+
     return executors.map((e) => {
       const r = results.get(e.callId)
       return (
@@ -524,6 +607,166 @@ export class ToolOrchestrator {
       if (readyReads >= 2) return true
     }
     return false
+  }
+
+  /**
+   * 获取工具优先级
+   */
+  private getToolPriority(toolName: string): TaskPriority {
+    const priorityMap: Record<string, TaskPriority> = {
+      read: TaskPriority.HIGH,
+      read_multiple: TaskPriority.HIGH,
+      edit: TaskPriority.CRITICAL,
+      write: TaskPriority.CRITICAL,
+      apply_patch: TaskPriority.CRITICAL,
+      bash: TaskPriority.NORMAL,
+      grep: TaskPriority.NORMAL,
+      glob: TaskPriority.NORMAL,
+    }
+    return priorityMap[toolName] ?? TaskPriority.NORMAL
+  }
+
+  /**
+   * 执行单个工具（用于批处理）
+   */
+  private async executeSingleTool(
+    executor: ToolExecutor,
+    duplicateOf: Map<string, string>,
+    completed: Set<string>,
+    results: Map<string, ToolExecutionResult>,
+  ): Promise<ToolExecutionResult> {
+    const start = Date.now()
+
+    try {
+      // 检查重复
+      const orig = duplicateOf.get(executor.callId)
+      if (orig && completed.has(orig)) {
+        const base = results.get(orig)
+        if (base) {
+          return {
+            ok: base.ok,
+            durationMs: base.durationMs,
+            toolCallId: executor.callId,
+            toolName: executor.toolName,
+            input: executor.input,
+            output: base.output,
+            error: base.error,
+          }
+        }
+      }
+
+      // 检查智能缓存
+      const cached = toolResultSmartCache.get(this.input.sessionID, executor.toolName, executor.input)
+      if (cached && typeof cached === "object" && cached !== null) {
+        const cachedOutput = cached as {
+          output?: string
+          title?: string
+          metadata?: Record<string, any>
+          attachments?: any[]
+        }
+        return {
+          ok: true,
+          durationMs: 0,
+          toolCallId: executor.callId,
+          toolName: executor.toolName,
+          input: executor.input,
+          output: {
+            output: cachedOutput.output ?? "",
+            title: cachedOutput.title ?? executor.toolName,
+            metadata: cachedOutput.metadata ?? {},
+            attachments: cachedOutput.attachments,
+          },
+        }
+      }
+
+      // 检查旧缓存
+      const cachedRead =
+        executor.toolName === "read" ||
+        executor.toolName === "read_multiple" ||
+        executor.toolName === "grep" ||
+        executor.toolName === "list" ||
+        executor.toolName === "glob"
+          ? ToolResultCache.getBySignature(this.input.sessionID, executor.toolName, executor.input)
+          : undefined
+      if (cachedRead) {
+        return {
+          ok: true,
+          durationMs: 0,
+          toolCallId: executor.callId,
+          toolName: executor.toolName,
+          input: executor.input,
+          output: {
+            output: cachedRead.output,
+            title: cachedRead.title,
+            metadata: cachedRead.metadata ?? {},
+            attachments: cachedRead.attachments,
+          },
+        }
+      }
+
+      // 检查写工具重复执行
+      const isWriteTool =
+        executor.toolName === "apply_patch" ||
+        executor.toolName === "edit" ||
+        executor.toolName === "write" ||
+        executor.toolName === "bash" ||
+        executor.toolName === "multiedit"
+
+      if (isWriteTool && !this.writeOnce.tryMark(this.input.sessionID, executor.callId)) {
+        return {
+          ok: false,
+          durationMs: 0,
+          toolCallId: executor.callId,
+          toolName: executor.toolName,
+          input: executor.input,
+          error: `Tool '${executor.toolName}' callID '${executor.callId}' already executed`,
+        }
+      }
+
+      // 执行工具
+      const keys = executor.getResourceKeys()
+      const mode = toolLockMode(executor.toolName)
+      const release = await this.shared.resourceLockManager.acquire(keys, mode)
+
+      try {
+        const timeout = executor.getTimeout()
+        const resultPromise = executor.execute({ ...this.input, tools: this.tools })
+
+        let result: ToolExecutionResult
+        if (timeout > 0) {
+          const timeoutPromise = new Promise<ToolExecutionResult>((_, reject) =>
+            setTimeout(() => reject(new Error(`Tool ${executor.toolName} timed out after ${timeout}ms`)), timeout),
+          )
+          result = await Promise.race([resultPromise, timeoutPromise])
+        } else {
+          result = await resultPromise
+        }
+
+        // 缓存结果
+        if (result.ok && result.output) {
+          toolResultSmartCache.set(this.input.sessionID, executor.toolName, executor.input, result.output)
+        }
+
+        return result
+      } finally {
+        release()
+      }
+    } catch (error) {
+      log.error("tool execution failed", {
+        sessionID: this.input.sessionID,
+        tool: executor.toolName,
+        callId: executor.callId,
+        error,
+      })
+      return {
+        ok: false,
+        durationMs: Date.now() - start,
+        toolCallId: executor.callId,
+        toolName: executor.toolName,
+        input: executor.input,
+        error: error instanceof Error ? error.message : String(error),
+      }
+    }
   }
 
   private async executeReadMultipleBatch(
@@ -746,7 +989,11 @@ async function executeTool(args: {
   }
 
   try {
-    const result = await executeFn(executor.input, { toolCallId: executor.callId, abortSignal: executor.abort, messages: [] })
+    const result = await executeFn(executor.input, {
+      toolCallId: executor.callId,
+      abortSignal: executor.abort,
+      messages: [],
+    })
     const attachments = result.attachments?.map((attachment: any) => ({
       ...attachment,
       id: Identifier.ascending("part"),
@@ -786,7 +1033,12 @@ async function executeTool(args: {
       toolCallId: executor.callId,
       toolName: executor.toolName,
       input: executor.input,
-      output: { output: result.output ?? "", title: result.title ?? executor.toolName, metadata: result.metadata ?? {}, attachments },
+      output: {
+        output: result.output ?? "",
+        title: result.title ?? executor.toolName,
+        metadata: result.metadata ?? {},
+        attachments,
+      },
     }
   } catch (error) {
     const errText = error instanceof Error ? error.message : String(error)

@@ -33,8 +33,9 @@ import { ApplyPatchTool } from "./apply_patch"
 export namespace ToolRegistry {
   const log = Log.create({ service: "tool.registry" })
 
-  const initializedCache = new Map<string, Awaited<ReturnType<Tool.Info["init"]>>>()
-  let toolsCache: { agentKey: string; tools: any[] } | null = null
+  const initializedCache = new Map<string, { data: Awaited<ReturnType<Tool.Info["init"]>>; timestamp: number }>()
+  let toolsCache: { agentKey: string; tools: any[]; timestamp: number } | null = null
+  const CACHE_TTL = 300000 // 5分钟缓存过期
 
   export const state = Instance.state(async () => {
     const custom = [] as Tool.Info[]
@@ -144,7 +145,9 @@ export namespace ToolRegistry {
     const modelKey = `${model.providerID}:${model.modelID}`
     const fullKey = `${agentKey}:${modelKey}`
 
-    if (toolsCache && toolsCache.agentKey === fullKey) {
+    // 检查缓存是否有效（带过期时间）
+    const now = Date.now()
+    if (toolsCache && toolsCache.agentKey === fullKey && now - toolsCache.timestamp < CACHE_TTL) {
       return toolsCache.tools
     }
 
@@ -165,13 +168,20 @@ export namespace ToolRegistry {
         })
         .map(async (t) => {
           const cacheKey = `${t.id}:${agentKey}`
-          let initialized = initializedCache.get(cacheKey)
+          const cached = initializedCache.get(cacheKey)
+          const now = Date.now()
 
-          if (!initialized) {
-            using _ = log.time(t.id)
-            initialized = await t.init({ agent })
-            initializedCache.set(cacheKey, initialized)
+          // 检查缓存是否有效
+          if (cached && now - cached.timestamp < CACHE_TTL) {
+            return {
+              id: t.id,
+              ...cached.data,
+            }
           }
+
+          using _ = log.time(t.id)
+          const initialized = await t.init({ agent })
+          initializedCache.set(cacheKey, { data: initialized, timestamp: now })
 
           return {
             id: t.id,
@@ -180,7 +190,7 @@ export namespace ToolRegistry {
         }),
     )
 
-    toolsCache = { agentKey: fullKey, tools: result }
+    toolsCache = { agentKey: fullKey, tools: result, timestamp: Date.now() }
     return result
   }
 

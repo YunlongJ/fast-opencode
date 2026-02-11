@@ -43,9 +43,16 @@ export class MemoryStore {
   private table: any = null
   private initialized = false
 
-  // Private constructor to prevent direct instantiation
-  private constructor() {
+  // Constructor is public for testing, but use getInstance() for production
+  constructor() {
     this.semanticEngine = new SemanticEngine()
+  }
+
+  /**
+   * Reset singleton instance (for testing only)
+   */
+  public static resetInstance(): void {
+    MemoryStore.instance = null
   }
 
   /**
