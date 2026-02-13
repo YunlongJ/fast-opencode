@@ -257,7 +257,7 @@ export namespace Project {
 
     log.info("migrating sessions from global", { newProjectID, worktree, count: globalSessions.length })
 
-    await work(10, globalSessions, async (key) => {
+    await work(10, globalSessions, async (key: string[]) => {
       const sessionID = key[key.length - 1]
       const session = await Storage.read<Session.Info>(key).catch(() => undefined)
       if (!session) return
@@ -280,10 +280,10 @@ export namespace Project {
 
   export async function list() {
     const keys = await Storage.list(["project"])
-    const projects = await Promise.all(keys.map((x) => Storage.read<Info>(x)))
+    const projects = await Promise.all(keys.map((x: string[]) => Storage.read<Info>(x)))
     return projects.map((project) => ({
       ...project,
-      sandboxes: project.sandboxes?.filter((x) => existsSync(x)),
+      sandboxes: project.sandboxes?.filter((x: string) => existsSync(x)),
     }))
   }
 

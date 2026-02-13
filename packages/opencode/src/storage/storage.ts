@@ -27,6 +27,7 @@ export namespace Storage {
     private static instance: LanceDBManager | null = null;
     private db: any | null = null;
     private table: any | null = null;
+    private lancedbModule: any = null;
     private initialized = false;
     private initializingPromise: Promise<void> | null = null;
 
@@ -56,6 +57,7 @@ export namespace Storage {
       try {
         log.info("Starting LanceDB initialization", { dataPath: Global.Path.data });
         const lancedb = await import("@lancedb/lancedb");
+        this.lancedbModule = lancedb;
         log.info("LanceDB module imported successfully");
         
         const dbPath = path.join(Global.Path.data, "storage.lance");
@@ -65,13 +67,17 @@ export namespace Storage {
         log.info("LanceDB connection established");
 
         // Create or open the main storage table
+        let tableExists = true;
         try {
           log.info("Attempting to open existing table");
           this.table = await this.db.openTable("storage");
           log.info("Opened existing table");
         } catch (e) {
           log.info("Table doesn't exist, creating new one", { error: (e as Error).message });
-          
+          tableExists = false;
+        }
+
+        if (!tableExists) {
           // Create table with initial data - LanceDB will infer schema from data
           // Include vector field with actual data so it can be inferred
           const initialData = [
@@ -89,6 +95,9 @@ export namespace Storage {
           log.info("Created new table with inferred schema");
         }
 
+        // Create indexes for frequently queried fields
+        await this.createIndexes();
+
         this.initialized = true;
         log.info("LanceDB initialized successfully", { path: dbPath });
       } catch (error) {
@@ -98,6 +107,29 @@ export namespace Storage {
         throw error; // Re-throw to propagate the error
       } finally {
         this.initializingPromise = null;
+      }
+    }
+
+    private async createIndexes(): Promise<void> {
+      if (!this.table || !this.db || !this.lancedbModule) return;
+
+      try {
+        // Create index on 'key' field for efficient WHERE queries
+        log.info("Creating index on 'key' field");
+        await this.table.createIndex("key", { config: this.lancedbModule.indexText() });
+
+        // Create index on 'createdAt' field for sorting
+        log.info("Creating index on 'createdAt' field");
+        await this.table.createIndex("createdAt");
+
+        // Create index on 'updatedAt' field for sorting
+        log.info("Creating index on 'updatedAt' field");
+        await this.table.createIndex("updatedAt");
+
+        log.info("All indexes created successfully");
+      } catch (error) {
+        // Index might already exist, which is fine
+        log.info("Index creation info", { error: (error as Error).message });
       }
     }
 
@@ -320,10 +352,50 @@ export namespace Storage {
       // Convert keys back to string arrays and sort them
       return filteredResults
         .map((r: any) => stringToKey(r.key))
-        .sort((a, b) => a.join('/').localeCompare(b.join('/')));
+        .sort((a: string[], b: string[]) => a.join('/').localeCompare(b.join('/')));
     } catch (error) {
       log.error("Failed to list from LanceDB storage", { prefix: keyToString(prefix), error });
       return [];
+    }
+  }
+
+  // Semantic Index namespace for vector-based semantic search
+  export namespace SemanticIndex {
+    const semanticPrefix = ["semantic"];
+
+    /**
+     * Index an item with its vector embedding
+     */
+    export async function indexItem(id: string, title: string, vector: number[]): Promise<void> {
+      const content = { id, title };
+      await writeWithVector([...semanticPrefix, id], content, vector);
+    }
+
+    /**
+     * Search for similar items by vector
+     */
+    export async function search(
+      queryVector: number[],
+      k: number = 3,
+      _minScore: number = 0.5
+    ): Promise<Array<{ id: string; title: string; url: string; score: number }>> {
+      const results = await searchByVector(queryVector, k);
+      return results.map((r) => ({
+        id: r.value.id || "",
+        title: r.value.title || "",
+        url: "",
+        score: 1 - r.score, // Convert distance to similarity score
+      }));
+    }
+
+    /**
+     * Clear all semantic index entries
+     */
+    export async function clear(): Promise<void> {
+      const keys = await list(semanticPrefix);
+      for (const key of keys) {
+        await remove(key);
+      }
     }
   }
 }

@@ -609,11 +609,11 @@ export namespace MessageV2 {
   }
 
   export const stream = fn(Identifier.schema("session"), async function* (sessionID) {
-    const list = await Array.fromAsync(await Storage.list(["message", sessionID]))
+    const list = await Array.fromAsync(await Storage.list(["message", sessionID])) as [string[], unknown, string][]
     for (let i = list.length - 1; i >= 0; i--) {
       yield await get({
         sessionID,
-        messageID: list[i][2],
+        messageID: list[i][2] as string,
       })
     }
   })

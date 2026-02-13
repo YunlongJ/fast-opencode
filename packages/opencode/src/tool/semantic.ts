@@ -47,7 +47,7 @@ export const SemanticTool = Tool.define("search_codebase", {
       }
 
       return {
-        title: `Search: ${params.query}`,
+        title: `Done ${results.length} results`,
         metadata: { results: results.length },
         output: results.join("\n\n---\n\n")
       }

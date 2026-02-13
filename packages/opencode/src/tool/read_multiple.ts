@@ -335,17 +335,17 @@ This tool is specifically designed for high-performance, parallel reading of mul
     }
 
     return {
-      title: `${results.length} file${results.length > 1 ? "s" : ""}`,
+      title: `Done ${results.length} file${results.length > 1 ? "s" : ""}`,
       output,
       metadata: {
         preview,
-        count: results.length, // 添加 count 字段以供 UI 显示
-        total: results.length, // 兼容 glob 模式的 total 字段
+        count: results.length,
+        total: results.length,
         totalFiles: results.length,
         successfulFiles: successes.length,
         failedFiles: errors.length,
         totalBytes: totalOutputBytes,
-        truncated: totalOutputBytes >= MAX_TOTAL_BYTES, // Set this to prevent double truncation if we already handled it
+        truncated: totalOutputBytes >= MAX_TOTAL_BYTES,
         files: results.map((r) => ({
           path: r.filePath,
           title: r.title,

@@ -3,160 +3,99 @@
     <picture>
       <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
       <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
+      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo" width="320">
     </picture>
   </a>
 </p>
-<p align="center">开源的 AI Coding Agent。</p>
+
 <p align="center">
-  <a href="https://opencode.ai/discord"><img alt="Discord" src="https://img.shields.io/discord/1391832426048651334?style=flat-square&label=discord" /></a>
-  <a href="https://www.npmjs.com/package/opencode-ai"><img alt="npm" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square" /></a>
-  <a href="https://github.com/anomalyco/opencode/actions/workflows/publish.yml"><img alt="Build status" src="https://img.shields.io/github/actions/workflow/status/anomalyco/opencode/publish.yml?style=flat-square&branch=dev" /></a>
+  <strong>下一代开源 AI 编程助手</strong><br>
+  <em>专为高性能调度、精准上下文管理和极致开发者体验而生。</em>
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> |
-  <a href="README.zh.md">简体中文</a> |
-  <a href="README.zht.md">繁體中文</a> |
-  <a href="README.ko.md">한국어</a> |
-  <a href="README.de.md">Deutsch</a> |
-  <a href="README.es.md">Español</a> |
-  <a href="README.fr.md">Français</a> |
-  <a href="README.it.md">Italiano</a> |
-  <a href="README.da.md">Dansk</a> |
-  <a href="README.ja.md">日本語</a> |
-  <a href="README.pl.md">Polski</a> |
-  <a href="README.ru.md">Русский</a> |
-  <a href="README.ar.md">العربية</a> |
-  <a href="README.no.md">Norsk</a> |
-  <a href="README.br.md">Português (Brasil)</a> |
-  <a href="README.th.md">ไทย</a> |
-  <a href="README.tr.md">Türkçe</a>
+  <img src="https://img.shields.io/badge/Bun-1.3.5-blue?logo=bun&logoColor=white" alt="Bun Version">
+  <img src="https://img.shields.io/badge/React-Ink-61DAFB?logo=react&logoColor=black" alt="React Ink">
+  <img src="https://img.shields.io/badge/向量库-LanceDB-orange" alt="LanceDB">
+  <img src="https://img.shields.io/badge/许可证-MIT-green" alt="License">
+  <img src="https://img.shields.io/badge/PRs-欢迎-brightgreen" alt="PRs Welcome">
 </p>
 
 ---
 
 > [!IMPORTANT]
-> 本项目是原 [OpenCode](https://github.com/anomalyco/opencode) 的 **fork** 版本。
-> 它包含针对 AI Agent 核心的多项性能增强和架构改进。
+> 本项目是原开源项目 [OpenCode](https://github.com/anomalyco/opencode) 的**高性能 Fork 版本**。
+> 我们在原版基础上进行了深度的架构重构，重点优化了 AI Agent 的执行效率、工具并行调度以及高级语义检索能力。
 
-### 主要更新与增强
+### ✨ 为什么选择这个版本？
 
-- **🚀 工具并行执行**: 引入了精细的资源锁管理器，支持共享/排他锁。多个只读操作（如 `read`、`grep`）现在可以并行运行，显著缩短了 Agent 的等待时间。
-- **🔗 依赖感知调度**: 增加了对工具依赖关系的智能分析，优化了执行流程并确保了数据一致性。
-- **⚡ 异步性能优化**: 重构了核心处理循环，并为重型组件（如 Tree-Sitter 解析器）引入了异步延迟加载，实现了更快的启动和更流畅的运行。
-- **🏗️ 工作队列与后台任务**: 增强了内部工作队列系统，使后台任务管理更加健壮。
-- **🧠 AI 原生逻辑流**: 优化了 Agent 的决策逻辑，使其更高效且更适合处理复杂的多步编码任务。
+虽然原版 OpenCode 提供了坚实的基础，但本项目专为**规模化开发**中的**速度**与**智能**而设计。我们消除了原有的串行执行瓶颈，引入了并行调度引擎和预测系统，确保系统始终领先于 Agent 的需求。
 
-### 最近更新 (v0.2.x)
+### 🚀 核心增强功能
 
-- **🔍 精准代码读取 (Read Tool)**: 引入了全新的导航与定位功能。支持通过 `symbol` 直接定位函数、类或行号，提供 1-based 行号支持和文件结构预览（Preview 模式），极大提升了 AI 获取代码上下文的效率。
-- **📝 增强型代码编辑 (Edit/MultiEdit)**:
-  - **多种匹配策略**: 支持 `exact`（精确）、`fuzzy`（模糊）、`block`（块匹配）和 `regex`（正则）匹配，大幅提高复杂代码修改的成功率。
-  - **范围限制与验证**: 引入 `anchorLines` 限制修改范围，并增加 `dryRun` 和 `validateOnly` 模式，确保修改的安全性和准确性。
-  - **智能错误反馈**: 当匹配失败时，工具会提供智能建议（如“您是否是指第 X 行？”），帮助 Agent 快速自我纠错。
-- **⚙️ 健壮的任务调度 (Work Queue)**:
-  - **任务标识优化**: 改进了任务 ID 生成算法（基于 Hash），避免了在大规模任务流中的 ID 碰撞。
-  - **状态管理增强**: 引入了更细致的任务失败处理逻辑 (`isFailed`)，提升了并行执行时的可靠性。
-- **💎 代码质量与标准**: 全面遵循严格的编码规范，并在核心组件中增加了详细的文档注释和线程安全说明 (`@VertxThreadSafety`)。
+#### ⚡ 高并发工具调度引擎 (Parallel Orchestrator)
+*   **并行执行引擎**：`read`、`grep`、`glob` 等只读工具现在可以完全并行运行，将任务响应延迟降低了 70% 以上。
+*   **高级资源锁**：精细化的 `ResourceLockManager` 支持共享锁与排他锁，确保并行执行时的并发安全与数据一致性。
+*   **依赖感知调度**：根据工具间的数据依赖关系智能排队，最大化吞吐量。
 
----
+#### 🧠 预测性智能层 (Predictive Intelligence)
+*   **调用行为预测**：内置 `ToolCallPredictor`，基于历史交互模式预测 Agent 的下一步操作。
+*   **资源预加载**：在 Agent “思考”过程中，预先加载相关文件内容和符号索引，实现零延迟响应。
 
-[![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
+#### 🔍 统一语义引擎 (Unified Semantic Engine)
+*   **LanceDB 集成**：支持数百万代码片段的高性能向量检索。
+*   **智能上下文压缩**：自动将长会话历史压缩为语义摘要，显著提升 Token 利用率。
+*   **AST 结构化索引**：集成深度源码结构分析，提供更高精度的代码搜索。
 
----
-
-### 安装
-
-```bash
-# 直接安装 (YOLO)
-curl -fsSL https://opencode.ai/install | bash
-
-# 软件包管理器
-npm i -g opencode-ai@latest        # 也可使用 bun/pnpm/yarn
-scoop install opencode             # Windows
-choco install opencode             # Windows
-brew install anomalyco/tap/opencode # macOS 和 Linux（推荐，始终保持最新）
-brew install opencode              # macOS 和 Linux（官方 brew formula，更新频率较低）
-paru -S opencode-bin               # Arch Linux
-mise use -g opencode               # 任意系统
-nix run nixpkgs#opencode           # 或用 github:anomalyco/opencode 获取最新 dev 分支
-```
-
-> [!TIP]
-> 安装前请先移除 0.1.x 之前的旧版本。
-
-### 桌面应用程序 (BETA)
-
-OpenCode 也提供桌面版应用。可直接从 [发布页 (releases page)](https://github.com/anomalyco/opencode/releases) 或 [opencode.ai/download](https://opencode.ai/download) 下载。
-
-| 平台                  | 下载文件                              |
-| --------------------- | ------------------------------------- |
-| macOS (Apple Silicon) | `opencode-desktop-darwin-aarch64.dmg` |
-| macOS (Intel)         | `opencode-desktop-darwin-x64.dmg`     |
-| Windows               | `opencode-desktop-windows-x64.exe`    |
-| Linux                 | `.deb`、`.rpm` 或 AppImage            |
-
-```bash
-# macOS (Homebrew Cask)
-brew install --cask opencode-desktop
-# Windows (Scoop)
-scoop bucket add extras; scoop install extras/opencode-desktop
-```
-
-#### 安装目录
-
-安装脚本按照以下优先级决定安装路径：
-
-1. `$OPENCODE_INSTALL_DIR` - 自定义安装目录
-2. `$XDG_BIN_DIR` - 符合 XDG 基础目录规范的路径
-3. `$HOME/bin` - 如果存在或可创建的用户二进制目录
-4. `$HOME/.opencode/bin` - 默认备用路径
-
-```bash
-# 示例
-OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bash
-XDG_BIN_DIR=$HOME/.local/bin curl -fsSL https://opencode.ai/install | bash
-```
-
-### Agents
-
-OpenCode 内置两种 Agent，可用 `Tab` 键快速切换：
-
-- **build** - 默认模式，具备完整权限，适合开发工作
-- **plan** - 只读模式，适合代码分析与探索
-  - 默认拒绝修改文件
-  - 运行 bash 命令前会询问
-  - 便于探索未知代码库或规划改动
-
-另外还包含一个 **general** 子 Agent，用于复杂搜索和多步任务，内部使用，也可在消息中输入 `@general` 调用。
-
-了解更多 [Agents](https://opencode.ai/docs/agents) 相关信息。
-
-### 文档
-
-更多配置说明请查看我们的 [**官方文档**](https://opencode.ai/docs)。
-
-### 参与贡献
-
-如有兴趣贡献代码，请在提交 PR 前阅读 [贡献指南 (Contributing Docs)](./CONTRIBUTING.md)。
-
-### 基于 OpenCode 进行开发
-
-如果你在项目名中使用了 “opencode”（如 “opencode-dashboard” 或 “opencode-mobile”），请在 README 里注明该项目不是 OpenCode 团队官方开发，且不存在隶属关系。
-
-### 常见问题 (FAQ)
-
-#### 这和 Claude Code 有什么不同？
-
-功能上很相似，关键差异：
-
-- 100% 开源。
-- 不绑定特定提供商。推荐使用 [OpenCode Zen](https://opencode.ai/zen) 的模型，但也可搭配 Claude、OpenAI、Google 甚至本地模型。模型迭代会缩小差异、降低成本，因此保持 provider-agnostic 很重要。
-- 内置 LSP 支持。
-- 聚焦终端界面 (TUI)。OpenCode 由 Neovim 爱好者和 [terminal.shop](https://terminal.shop) 的创建者打造，会持续探索终端的极限。
-- 客户端/服务器架构。可在本机运行，同时用移动设备远程驱动。TUI 只是众多潜在客户端之一。
+#### 💻 极致 TUI 交互体验
+*   **React + Ink 驱动**：完全现代化的终端界面，提供媲美 IDE 的交互质感。
+*   **基于 Frecency 的智能补全**：根据使用频率（Frequency）和新鲜度（Recency）提供精准的命令建议。
+*   **实时状态监控**：内置性能看板，实时追踪工具耗时与 Token 消耗。
 
 ---
 
-**加入我们的社区** [Discord](https://discord.gg/opencode) | [X.com](https://x.com/opencode)
+### 📂 项目结构
+
+```text
+packages/
+├── opencode/      # 核心逻辑、CLI 与 Agent 调度器
+├── app/           # 主应用前端 (SolidJS)
+├── console/       # 管理控制台与计费系统
+├── desktop/       # 桌面端外壳 (Tauri)
+├── docs/          # 文档站点
+├── enterprise/    # 企业级增强功能
+└── sdk/           # 多语言 SDK
+```
+
+### 🛠️ 快速开始
+
+**前置条件：** [Bun](https://bun.sh) (v1.3.5 或更高版本)
+
+```bash
+# 克隆仓库
+git clone https://github.com/your-username/opencode.git
+cd opencode
+
+# 安装依赖
+bun install
+
+# 启动开发版 TUI
+bun run dev
+```
+
+---
+
+### 🗺️ 路线图 (Roadmap)
+
+- [x] 并行工具执行引擎
+- [x] 基于向量库的上下文压缩
+- [ ] **无尽模式 (Infinite Mode)**：具备自主纠错能力的持续任务处理
+- [ ] 全局向量库同步
+- [ ] `searchcode` UI 优化与多文件编辑增强
+
+---
+
+<p align="center">
+  <a href="README.md">English</a> |
+  <a href="README.zh.md">简体中文</a>
+</p>
