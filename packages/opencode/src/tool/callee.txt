@@ -1,0 +1,9 @@
+Search for potential function or method calls (callees) within a specific file, code range, or an entire directory using heuristic patterns.
+This tool is useful for identifying what other functions or methods are being called by a specific piece of code or within a project.
+It uses ripgrep for fast searching and applies language-aware filtering to reduce false positives from keywords (like 'if', 'while', etc.).
+
+Examples:
+- Find all calls in a specific file: { "filePath": "src/main.ts" }
+- Find calls within a specific function body: { "filePath": "src/main.ts", "startLine": 10, "endLine": 50 }
+- Find calls in a directory (global search): { "directory": "src/core", "include": "*.ts" }
+- Find calls matching a specific pattern: { "directory": "src", "pattern": "log\\..*" }

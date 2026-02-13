@@ -2,9 +2,10 @@ import { SemanticEngine } from "./semantic"
 import { Log } from "@/util/log"
 import { Instance } from "@/project/instance"
 import path from "path"
+import { Storage } from "../../storage/storage"
 
-// LanceDB types
-interface LanceVectorRecord {
+// Memory entry stored in unified storage
+interface StoredMemoryEntry {
   id: string
   vector: number[]
   content: string
@@ -37,10 +38,7 @@ export class MemoryStore {
   private changes: MemoryEntry[] = []
   private todos: MemoryEntry[] = []
 
-  // LanceDB
   private semanticEngine: SemanticEngine
-  private db: any = null
-  private table: any = null
   private initialized = false
 
   // Constructor is public for testing, but use getInstance() for production
@@ -67,36 +65,10 @@ export class MemoryStore {
 
   async init(): Promise<void> {
     if (this.initialized) return
-
-    try {
-      const lancedb = await import("@lancedb/lancedb")
-      const dbPath = path.join(Instance.directory || process.cwd(), ".opencode", "memory.lance")
-      this.db = await lancedb.connect(dbPath)
-
-      // Create or open table
-      try {
-        this.table = await this.db.openTable("memories")
-      } catch {
-        // Table doesn't exist, create it
-        this.table = await this.db.createTable("memories", [
-          {
-            id: "init",
-            vector: new Array(MemoryStore.VECTOR_DIM).fill(0),
-            content: "",
-            type: "init",
-            timestamp: Date.now(),
-            metadata: "{}",
-          },
-        ])
-      }
-
-      this.initialized = true
-      MemoryStore.log.info("LanceDB initialized", { path: dbPath })
-    } catch (error) {
-      MemoryStore.log.error("Failed to initialize LanceDB", { error })
-      // Continue without vector store
-      this.initialized = false
-    }
+    
+    // The storage is initialized via the Storage namespace, no additional initialization needed
+    this.initialized = true;
+    MemoryStore.log.info("MemoryStore initialized with unified storage");
   }
 
   async addMessage(role: string, content: string, metadata?: any): Promise<void> {
@@ -113,8 +85,8 @@ export class MemoryStore {
     // Generate vector
     entry.vector = await this.semanticEngine.getEmbedding(content)
 
-    // Save to LanceDB
-    if (this.initialized && this.table) {
+    // Save to vector storage
+    if (this.initialized) {
       await this.saveToVectorStore(entry)
     }
 
@@ -201,8 +173,8 @@ export class MemoryStore {
     const matchingChanges = this.changes.filter((c) => queryLower.includes(c.metadata.file?.toLowerCase()))
     results.push(...matchingChanges)
 
-    // 2. Vector similarity search from LanceDB
-    if (this.initialized && this.table) {
+    // 2. Vector similarity search from unified storage
+    if (this.initialized) {
       try {
         const queryVector = await this.semanticEngine.getEmbedding(query)
         const vectorResults = await this.searchVectorStore(queryVector, limit)
@@ -263,33 +235,28 @@ export class MemoryStore {
   }
 
   private async saveToVectorStore(entry: MemoryEntry): Promise<void> {
-    if (!this.table || !entry.vector) return
+    if (!entry.vector) return
 
-    const record: LanceVectorRecord = {
-      id: entry.id,
-      vector: entry.vector,
-      content: entry.content,
-      type: entry.type,
-      timestamp: entry.timestamp,
-      metadata: JSON.stringify(entry.metadata),
-    }
-
-    await this.table.add([record])
+    // Use the new unified storage with vector support
+    const storageKey = ["memory", entry.type, entry.id];
+    await Storage.writeWithVector(storageKey, entry, entry.vector);
   }
 
   private async searchVectorStore(queryVector: number[], limit: number): Promise<MemoryEntry[]> {
-    if (!this.table) return []
-
-    const results = await this.table.search(queryVector).limit(limit).execute()
-
-    return results.map((r: LanceVectorRecord) => ({
-      id: r.id,
-      type: r.type as MemoryEntry["type"],
-      content: r.content,
-      timestamp: r.timestamp,
-      metadata: JSON.parse(r.metadata),
-      vector: r.vector,
-    }))
+    // Use the new unified storage vector search
+    const results = await Storage.searchByVector(queryVector, limit);
+    
+    return results.map((r) => {
+      const entry = r.value as MemoryEntry;
+      return {
+        id: entry.id,
+        type: entry.type,
+        content: entry.content,
+        timestamp: entry.timestamp,
+        metadata: entry.metadata,
+        vector: entry.vector,
+      };
+    });
   }
 
   private deduplicateAndRank(results: MemoryEntry[], query: string): MemoryEntry[] {
