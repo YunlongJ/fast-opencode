@@ -172,7 +172,17 @@ export namespace SessionSummary {
       messageID: Identifier.schema("message").optional(),
     }),
     async (input) => {
-      const diffs = await Storage.read<Snapshot.FileDiff[]>(["session_diff", input.sessionID]).catch(() => [])
+      let diffs: Snapshot.FileDiff[]
+      try {
+        diffs = await Storage.read<Snapshot.FileDiff[]>(["session_diff", input.sessionID])
+      } catch (e) {
+        if (e instanceof Storage.NotFoundError) {
+          diffs = []
+        } else {
+          throw e
+        }
+      }
+
       const next = diffs.map((item) => {
         const file = unquoteGitPath(item.file)
         if (file === item.file) return item
@@ -181,8 +191,12 @@ export namespace SessionSummary {
           file,
         }
       })
+
       const changed = next.some((item, i) => item.file !== diffs[i]?.file)
-      if (changed) Storage.write(["session_diff", input.sessionID], next).catch(() => {})
+      if (changed) {
+        await Storage.write(["session_diff", input.sessionID], next)
+      }
+
       return next
     },
   )

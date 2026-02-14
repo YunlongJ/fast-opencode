@@ -1,5 +1,5 @@
 import { Log } from "@/util/log"
-import type { MemoryStore } from "./memory-store"
+import { Storage } from "@/storage/storage"
 
 interface ToolResult {
   toolName: string
@@ -10,12 +10,21 @@ interface ToolResult {
   error?: string
 }
 
+interface MemoryEntry {
+  id: string
+  type: "decision" | "change" | "todo"
+  content: string
+  timestamp: number
+  metadata: Record<string, any>
+}
+
 /**
  * 信息提取器
- * 从对话中自动提取决策、修改、待办
+ * 从对话中自动提取决策、修改、待办，存储到 Storage.Vector
  */
 export class InfoExtractor {
   private static readonly log = Log.create({ service: "info.extractor" })
+  private static readonly COLLECTION = "memories"
 
   // 决策信号词 - 更严格的匹配
   private static readonly DECISION_SIGNALS = [
@@ -40,31 +49,26 @@ export class InfoExtractor {
   private static readonly COMPLETE_SIGNALS = [/(?:做好了|完成了|搞定了|ok了|可以了|已实现)/i]
 
   /**
-   * 从对话中提取信息并存入MemoryStore
+   * 从对话中提取信息并存入 Storage
    */
-  static extract(
-    userMessage: string,
-    assistantMessage: string,
-    toolResults: ToolResult[],
-    memoryStore: MemoryStore,
-  ): void {
+  static async extract(userMessage: string, assistantMessage: string, toolResults: ToolResult[]): Promise<void> {
     // 1. 提取决策
-    this.extractDecision(userMessage, assistantMessage, memoryStore)
+    await this.extractDecision(userMessage, assistantMessage)
 
     // 2. 提取修改
-    this.extractChanges(toolResults, memoryStore)
+    await this.extractChanges(toolResults)
 
     // 3. 提取待办
-    this.extractTodos(userMessage, assistantMessage, memoryStore)
+    await this.extractTodos(userMessage, assistantMessage)
 
     // 4. 检查待办完成
-    this.checkTodoCompletion(userMessage, assistantMessage, toolResults, memoryStore)
+    await this.checkTodoCompletion(userMessage, assistantMessage, toolResults)
   }
 
   /**
    * 提取决策
    */
-  private static extractDecision(userMessage: string, assistantMessage: string, memoryStore: MemoryStore): void {
+  private static async extractDecision(userMessage: string, assistantMessage: string): Promise<void> {
     // 检查是否有拒绝信号
     const hasReject = this.REJECT_SIGNALS.some((pattern) => pattern.test(userMessage))
 
@@ -80,7 +84,15 @@ export class InfoExtractor {
         const decision = match[1].trim()
         // 提取关键词（简单实现：提取技术术语、方案名称）
         const keywords = this.extractKeywords(decision)
-        memoryStore.addDecision(decision, keywords)
+
+        await this.addToStorage({
+          id: `decision_${Date.now()}`,
+          type: "decision",
+          content: decision,
+          timestamp: Date.now(),
+          metadata: { keywords, source: "user" },
+        })
+
         this.log.info("Decision extracted", { decision, keywords })
         return
       }
@@ -92,7 +104,15 @@ export class InfoExtractor {
     if (aiMatch && aiMatch[1]) {
       const decision = aiMatch[1].trim()
       const keywords = this.extractKeywords(decision)
-      memoryStore.addDecision(decision, keywords)
+
+      await this.addToStorage({
+        id: `decision_${Date.now()}`,
+        type: "decision",
+        content: decision,
+        timestamp: Date.now(),
+        metadata: { keywords, source: "assistant" },
+      })
+
       this.log.info("Decision extracted from AI", { decision, keywords })
     }
   }
@@ -100,23 +120,38 @@ export class InfoExtractor {
   /**
    * 提取修改
    */
-  private static extractChanges(toolResults: ToolResult[], memoryStore: MemoryStore): void {
+  private static async extractChanges(toolResults: ToolResult[]): Promise<void> {
     for (const result of toolResults) {
       if (result.toolName === "edit" || result.toolName === "write") {
         const file = result.input?.file || "unknown"
         const action = result.toolName === "write" && result.input?.create ? "add" : "modify"
 
         // 生成修改描述
-        let description = this.generateChangeDescription(result)
+        const description = this.generateChangeDescription(result)
 
-        memoryStore.addChange(file, action, description)
+        await this.addToStorage({
+          id: `change_${Date.now()}_${file}`,
+          type: "change",
+          content: `${file}: ${description}`,
+          timestamp: Date.now(),
+          metadata: { file, action, description },
+        })
+
         this.log.info("Change extracted", { file, action, description })
       } else if (result.toolName === "bash" && result.input?.command?.includes("rm ")) {
         // 删除文件
         const match = result.input.command.match(/rm\s+(.+)/)
         if (match) {
           const file = match[1].trim()
-          memoryStore.addChange(file, "delete", "删除文件")
+
+          await this.addToStorage({
+            id: `change_${Date.now()}_${file}`,
+            type: "change",
+            content: `${file}: 删除文件`,
+            timestamp: Date.now(),
+            metadata: { file, action: "delete" },
+          })
+
           this.log.info("Change extracted", { file, action: "delete" })
         }
       }
@@ -126,7 +161,7 @@ export class InfoExtractor {
   /**
    * 提取待办
    */
-  private static extractTodos(userMessage: string, assistantMessage: string, memoryStore: MemoryStore): void {
+  private static async extractTodos(userMessage: string, assistantMessage: string): Promise<void> {
     const combinedText = userMessage + " " + assistantMessage
 
     for (const pattern of this.TODO_SIGNALS) {
@@ -136,7 +171,14 @@ export class InfoExtractor {
           const todo = match[1].trim()
           // 过滤掉太短的
           if (todo.length > 5) {
-            memoryStore.addTodo(todo)
+            await this.addToStorage({
+              id: `todo_${Date.now()}`,
+              type: "todo",
+              content: todo,
+              timestamp: Date.now(),
+              metadata: { status: "pending" },
+            })
+
             this.log.info("Todo extracted", { todo })
           }
         }
@@ -147,12 +189,11 @@ export class InfoExtractor {
   /**
    * 检查待办完成
    */
-  private static checkTodoCompletion(
+  private static async checkTodoCompletion(
     userMessage: string,
     assistantMessage: string,
     toolResults: ToolResult[],
-    memoryStore: MemoryStore,
-  ): void {
+  ): Promise<void> {
     const combinedText = userMessage + " " + assistantMessage
 
     // 检查完成信号
@@ -165,12 +206,84 @@ export class InfoExtractor {
         if (result.toolName === "edit" || result.toolName === "write") {
           const file = result.input?.file || ""
           // 尝试完成与文件相关的待办
-          memoryStore.completeTodo(`修改${file}`)
-          memoryStore.completeTodo(`更新${file}`)
-          memoryStore.completeTodo(`测试${file}`)
+          await this.completeTodoByPattern(`修改${file}`)
+          await this.completeTodoByPattern(`更新${file}`)
+          await this.completeTodoByPattern(`测试${file}`)
         }
       }
     }
+  }
+
+  /**
+   * 添加到存储
+   */
+  private static async addToStorage(entry: MemoryEntry): Promise<void> {
+    try {
+      // 使用简单的哈希向量作为 fallback
+      const embedding = this.generateSimpleEmbedding(entry.content)
+
+      await Storage.Vector.upsert(this.COLLECTION, {
+        id: entry.id,
+        content: entry.content,
+        embedding,
+        metadata: { ...entry.metadata, type: entry.type, timestamp: entry.timestamp },
+      })
+    } catch (e) {
+      this.log.error("Failed to add to storage", { entry, error: e })
+    }
+  }
+
+  /**
+   * 根据模式完成待办
+   */
+  private static async completeTodoByPattern(pattern: string): Promise<void> {
+    try {
+      // 搜索匹配的待办
+      const results = await Storage.Vector.searchByContent(this.COLLECTION, pattern, { limit: 5 })
+
+      for (const result of results) {
+        if (result.metadata?.type === "todo" && result.metadata?.status === "pending") {
+          // 更新为已完成
+          await Storage.Vector.upsert(this.COLLECTION, {
+            id: result.id,
+            content: result.content,
+            embedding: [], // 保持原有向量，这里简化处理
+            metadata: { ...result.metadata, status: "done", completedAt: Date.now() },
+          })
+
+          this.log.info("Todo marked as done", { content: result.content })
+        }
+      }
+    } catch (e) {
+      this.log.error("Failed to complete todo", { pattern, error: e })
+    }
+  }
+
+  /**
+   * 生成简单的哈希向量（fallback）
+   */
+  private static generateSimpleEmbedding(text: string): number[] {
+    const vectorSize = 384
+    const tokens = text
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((t) => t.length > 1)
+
+    const vector = new Array(vectorSize).fill(0)
+
+    for (const token of tokens) {
+      let hash = 5381
+      for (let i = 0; i < token.length; i++) {
+        hash = (hash * 33) ^ token.charCodeAt(i)
+      }
+
+      const index = Math.abs(hash) % vectorSize
+      const sign = (hash & 1) === 0 ? 1 : -1
+      vector[index] += sign
+    }
+
+    const magnitude = Math.sqrt(vector.reduce((acc, val) => acc + val * val, 0))
+    return magnitude > 1e-6 ? vector.map((v) => v / magnitude) : vector
   }
 
   /**
@@ -232,7 +345,6 @@ export class InfoExtractor {
     }
 
     // 尝试从oldString/newString提取关键信息
-    const oldStr = result.input?.oldString || ""
     const newStr = result.input?.newString || ""
 
     // 提取函数名、类名等

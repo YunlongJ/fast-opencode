@@ -269,7 +269,16 @@ export namespace Worktree {
   }
 
   async function runStartScripts(directory: string, input: { projectID: string; extra?: string }) {
-    const project = await Storage.read<Project.Info>(["project", input.projectID]).catch(() => undefined)
+    let project: Project.Info | undefined
+    try {
+      project = await Storage.read<Project.Info>(["project", input.projectID])
+    } catch (e) {
+      if (e instanceof Storage.NotFoundError) {
+        project = undefined
+      } else {
+        throw e
+      }
+    }
     const startup = project?.commands?.start?.trim() ?? ""
     const ok = await runStartScript(directory, startup, "project")
     if (!ok) return false

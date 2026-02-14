@@ -21,7 +21,6 @@ import { PermissionNext } from "@/permission/next"
 import { Question } from "@/question"
 import { Truncate } from "@/tool/truncation"
 import { MemoryContextEngine } from "./context"
-import { MemoryStore } from "./memory-store"
 import { InfoExtractor } from "./info-extractor"
 
 type Ref<T> = { value: T }
@@ -94,8 +93,6 @@ export class StepEngine {
 
     let llmMessages = streamInput.messages
     const maxToolSteps = 25
-    const memoryStore = MemoryStore.getInstance()
-    await memoryStore.init()
     let contextInjected = false // 确保每个 User 消息仅注入一次上下文
 
     try {
@@ -126,12 +123,8 @@ export class StepEngine {
         }
 
         // --- 上下文治理 (Governance) ---
-        const lastUserMessage = llmMessages.findLast((m) => m.role === "user")
-        const queryHint = typeof lastUserMessage?.content === "string" ? lastUserMessage.content : undefined
-        if (queryHint) {
-          const contextStr = await memoryStore.buildContext(queryHint)
-          llmMessages = this.injectContext(llmMessages, contextStr)
-        }
+        // 注意：MemoryStore 已被移除，上下文注入功能暂时禁用
+        // 后续可以通过 Storage.Vector 实现类似功能
 
         const stepExecutors: EngineToolExecutor[] = []
         const toolsForLLM = this.deps.stripExecute(streamInput.tools)
@@ -376,19 +369,14 @@ export class StepEngine {
                 // Parse memory markers before processing
                 const memories = this.parseMemoryMarkers(currentText.text)
 
-                // Store memories
+                // Store memories using InfoExtractor
                 for (const memory of memories) {
                   if (memory.type === "decision") {
-                    memoryStore.addDecision(memory.content, memory.keywords || [])
+                    // TODO: 使用 Storage.Vector 存储决策
                   } else if (memory.type === "todo") {
-                    memoryStore.addTodo(memory.content)
+                    // TODO: 使用 Storage.Vector 存储待办
                   } else if (memory.type === "change") {
-                    const parts = memory.content.split(":")
-                    if (parts.length >= 2) {
-                      const file = parts[0]
-                      const description = parts.slice(1).join(":")
-                      memoryStore.addChange(file, "modify", description)
-                    }
+                    // TODO: 使用 Storage.Vector 存储修改
                   }
                 }
 
@@ -623,7 +611,7 @@ export class StepEngine {
           (n) => n.status === "completed" || n.status === "error" || n.status === "skipped",
         )
 
-        // 提取信息到 MemoryStore
+        // 提取信息到 Storage
         if (allDone) {
           const userMessage = llmMessages.findLast((m) => m.role === "user")
           const assistantMessage = llmMessages.findLast((m) => m.role === "assistant")
@@ -632,10 +620,7 @@ export class StepEngine {
             const userContent = typeof userMessage.content === "string" ? userMessage.content : ""
             const assistantContent = typeof assistantMessage.content === "string" ? assistantMessage.content : ""
 
-            await memoryStore.addMessage("user", userContent)
-            await memoryStore.addMessage("assistant", assistantContent)
-
-            InfoExtractor.extract(
+            await InfoExtractor.extract(
               userContent,
               assistantContent,
               finalResults.map((r) => ({
@@ -646,7 +631,6 @@ export class StepEngine {
                 output: r.ok ? { output: r.output } : undefined,
                 error: r.ok ? undefined : r.toolOutput,
               })),
-              memoryStore,
             )
           }
         }

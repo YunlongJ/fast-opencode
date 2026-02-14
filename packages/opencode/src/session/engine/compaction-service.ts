@@ -16,6 +16,7 @@ import { BusEvent } from "@/bus/bus-event"
 import z from "zod"
 import { fn } from "@/util/fn"
 import { SessionPrompt } from "../prompt"
+import { Storage } from "@/storage/storage"
 
 /**
  * 会话压缩服务
@@ -119,6 +120,7 @@ export class CompactionService {
         if (part.state.status !== "completed") continue
 
         const output = part.state.output
+        const originalTokens = Token.estimate(output)
         // 如果输出过大，尝试总结而不是直接丢弃
         if (output.length > 5000) {
           const summary = await this.summarize(output)
@@ -126,6 +128,16 @@ export class CompactionService {
         }
         part.state.time.compacted = Date.now()
         await Session.updatePart(part)
+
+        // 记录压缩操作到 Storage
+        const compactedTokens = Token.estimate(part.state.output)
+        await Storage.Compaction.recordCompaction({
+          sessionID: input.sessionID,
+          messageID: part.messageID,
+          operation: "prune",
+          originalTokens,
+          compactedTokens,
+        })
       }
       this.log.info("Pruning complete", { pruned: prunedCount, parts: toPrune.length })
     }
@@ -260,6 +272,16 @@ export class CompactionService {
       // The caller should handle the error and potentially retry with different strategy
       return "stop"
     }
+
+    // 记录压缩操作到 Storage
+    const totalTokens = input.messages.reduce((sum, m) => sum + ((m.info as any).tokens?.input || 0), 0)
+    await Storage.Compaction.recordCompaction({
+      sessionID: input.sessionID,
+      messageID: msg.id,
+      operation: "checkpoint",
+      originalTokens: totalTokens,
+      compactedTokens: 0, // 简化处理，实际值需要从消息中计算
+    })
 
     Bus.publish(this.Event.Compacted, { sessionID: input.sessionID })
     return "continue"

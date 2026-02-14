@@ -107,7 +107,16 @@ export namespace PermissionNext {
 
   const state = Instance.state(async () => {
     const projectID = Instance.project.id
-    const stored = await Storage.read<Ruleset>(["permission", projectID]).catch(() => [] as Ruleset)
+    let stored: Ruleset
+    try {
+      stored = await Storage.read<Ruleset>(["permission", projectID])
+    } catch (e) {
+      if (e instanceof Storage.NotFoundError) {
+        stored = []
+      } else {
+        throw e
+      }
+    }
 
     const pending: Record<
       string,
