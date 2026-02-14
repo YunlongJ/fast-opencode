@@ -332,23 +332,29 @@ export namespace Session {
 
   export async function* list() {
     const project = Instance.project
-    for (const item of await Storage.list(["session", project.id])) {
-      const session = await Storage.read<Info>(item).catch(() => undefined)
-      if (!session) continue
-      yield session
+    const keys = await Storage.list(["session", project.id])
+
+    // 使用批量读取替代 N+1 查询
+    const sessions = await Storage.readMany<Info>(keys)
+
+    for (const session of sessions) {
+      if (session.data !== null && session.error === undefined) {
+        yield session.data
+      }
     }
   }
 
   export const children = fn(Identifier.schema("session"), async (parentID) => {
     const project = Instance.project
-    const result = [] as Session.Info[]
-    for (const item of await Storage.list(["session", project.id])) {
-      const session = await Storage.read<Info>(item).catch(() => undefined)
-      if (!session) continue
-      if (session.parentID !== parentID) continue
-      result.push(session)
-    }
-    return result
+    const keys = await Storage.list(["session", project.id])
+
+    // 使用批量读取替代 N+1 查询
+    const sessions = await Storage.readMany<Info>(keys)
+
+    return sessions
+      .filter((s): s is { key: string[]; data: Info } => s.data !== null && s.error === undefined)
+      .map((s) => s.data)
+      .filter((session) => session.parentID === parentID)
   })
 
   export const remove = fn(Identifier.schema("session"), async (sessionID) => {

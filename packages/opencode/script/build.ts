@@ -29,6 +29,16 @@ const singleFlag = process.argv.includes("--single")
 const baselineFlag = process.argv.includes("--baseline")
 const skipInstall = process.argv.includes("--skip-install")
 
+// 需要保留在外部的原生库（不打包进二进制）
+const externalNativePkgs = [
+  "sqlite-vec",
+  "sqlite-vec-darwin-x64",
+  "sqlite-vec-darwin-arm64",
+  "sqlite-vec-linux-x64",
+  "sqlite-vec-linux-arm64",
+  "sqlite-vec-windows-x64",
+]
+
 const allTargets: {
   os: string
   arch: "arm64" | "x64"
@@ -115,6 +125,12 @@ const binaries: Record<string, string> = {}
 if (!skipInstall) {
   await $`bun install --os="*" --cpu="*" @opentui/core@${pkg.dependencies["@opentui/core"]}`
   await $`bun install --os="*" --cpu="*" @parcel/watcher@${pkg.dependencies["@parcel/watcher"]}`
+  // 安装 sqlite-vec 平台依赖
+  await $`bun install sqlite-vec-darwin-x64@${pkg.dependencies["sqlite-vec"]}`
+  await $`bun install sqlite-vec-darwin-arm64@${pkg.dependencies["sqlite-vec"]}`
+  await $`bun install sqlite-vec-linux-x64@${pkg.dependencies["sqlite-vec"]}`
+  await $`bun install sqlite-vec-linux-arm64@${pkg.dependencies["sqlite-vec"]}`
+  await $`bun install sqlite-vec-windows-x64@${pkg.dependencies["sqlite-vec"]}`
 }
 for (const item of targets) {
   const name = [
@@ -148,6 +164,8 @@ for (const item of targets) {
     tsconfig: "./tsconfig.json",
     plugins: [solidPlugin],
     sourcemap: "external",
+    // 不打包原生库，保留外部引用
+    external: externalNativePkgs,
     compile: {
       autoloadBunfig: false,
       autoloadDotenv: false,
@@ -169,6 +187,16 @@ for (const item of targets) {
       OPENCODE_LIBC: item.os === "linux" ? `'${item.abi ?? "glibc"}'` : "",
     },
   })
+
+  // Copy native packages (external dependencies) to dist after build
+  await $`mkdir -p dist/${name}/node_modules`
+  for (const pkg of externalNativePkgs) {
+    const pkgDir = path.join(dir, `node_modules/${pkg}`)
+    if (fs.existsSync(pkgDir)) {
+      // Use cp with -L to follow symlinks and copy actual files
+      await $`cp -rL ${pkgDir} dist/${name}/node_modules/`
+    }
+  }
 
   await $`rm -rf ./dist/${name}/bin/tui`
   await Bun.file(`dist/${name}/package.json`).write(

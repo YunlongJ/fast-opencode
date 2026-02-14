@@ -619,13 +619,15 @@ export namespace MessageV2 {
   })
 
   export const parts = fn(Identifier.schema("message"), async (messageID) => {
-    const result = [] as MessageV2.Part[]
-    for (const item of await Storage.list(["part", messageID])) {
-      const read = await Storage.read<MessageV2.Part>(item)
-      result.push(read)
-    }
-    result.sort((a, b) => (a.id > b.id ? 1 : -1))
-    return result
+    const keys = await Storage.list(["part", messageID])
+
+    // 使用批量读取替代 N+1 查询
+    const parts = await Storage.readMany<MessageV2.Part>(keys)
+
+    return parts
+      .filter((p): p is { key: string[]; data: MessageV2.Part } => p.data !== null && p.error === undefined)
+      .map((p) => p.data)
+      .sort((a, b) => (a.id > b.id ? 1 : -1))
   })
 
   export const get = fn(

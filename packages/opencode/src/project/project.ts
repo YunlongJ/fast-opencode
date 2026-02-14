@@ -175,7 +175,17 @@ export namespace Project {
       }
     })
 
-    let existing = await Storage.read<Info>(["project", id]).catch(() => undefined)
+    let existing: Info | undefined
+    try {
+      existing = await Storage.read<Info>(["project", id])
+    } catch (e) {
+      if (e instanceof Storage.NotFoundError) {
+        existing = undefined
+      } else {
+        throw e
+      }
+    }
+
     if (!existing) {
       existing = {
         id,
@@ -249,25 +259,44 @@ export namespace Project {
   }
 
   async function migrateFromGlobal(newProjectID: string, worktree: string) {
-    const globalProject = await Storage.read<Info>(["project", "global"]).catch(() => undefined)
-    if (!globalProject) return
+    let globalProject: Info | undefined
+    try {
+      globalProject = await Storage.read<Info>(["project", "global"])
+    } catch (e) {
+      if (e instanceof Storage.NotFoundError) {
+        return
+      }
+      throw e
+    }
 
-    const globalSessions = await Storage.list(["session", "global"]).catch(() => [])
+    let globalSessions: string[][]
+    try {
+      globalSessions = await Storage.list(["session", "global"])
+    } catch {
+      return
+    }
+
     if (globalSessions.length === 0) return
 
     log.info("migrating sessions from global", { newProjectID, worktree, count: globalSessions.length })
 
-    await work(10, globalSessions, async (key) => {
-      const sessionID = key[key.length - 1]
-      const session = await Storage.read<Session.Info>(key).catch(() => undefined)
-      if (!session) return
-      if (session.directory && session.directory !== worktree) return
+    // 使用批量读取替代 N+1 查询
+    const sessions = await Storage.readMany<Session.Info>(globalSessions)
 
-      session.projectID = newProjectID
-      log.info("migrating session", { sessionID, from: "global", to: newProjectID })
-      await Storage.write(["session", newProjectID, sessionID], session)
-      await Storage.remove(key)
-    }).catch((error) => {
+    await work(
+      10,
+      sessions.filter((s) => s.data !== null),
+      async (item) => {
+        const session = item.data!
+        const sessionID = item.key[item.key.length - 1]
+        if (session.directory && session.directory !== worktree) return
+
+        session.projectID = newProjectID
+        log.info("migrating session", { sessionID, from: "global", to: newProjectID })
+        await Storage.write(["session", newProjectID, sessionID], session)
+        await Storage.remove(item.key)
+      },
+    ).catch((error) => {
       log.error("failed to migrate sessions from global to project", { error, projectId: newProjectID })
     })
   }
@@ -280,11 +309,17 @@ export namespace Project {
 
   export async function list() {
     const keys = await Storage.list(["project"])
-    const projects = await Promise.all(keys.map((x) => Storage.read<Info>(x)))
-    return projects.map((project) => ({
-      ...project,
-      sandboxes: project.sandboxes?.filter((x) => existsSync(x)),
-    }))
+
+    // 使用批量读取替代 Promise.all + 单独读取
+    const results = await Storage.readMany<Info>(keys)
+
+    return results
+      .filter((r): r is { key: string[]; data: Info } => r.data !== null && r.error === undefined)
+      .map((r) => r.data)
+      .map((project) => ({
+        ...project,
+        sandboxes: project.sandboxes?.filter((x) => existsSync(x)),
+      }))
   }
 
   export const update = fn(
@@ -328,7 +363,16 @@ export namespace Project {
   )
 
   export async function sandboxes(projectID: string) {
-    const project = await Storage.read<Info>(["project", projectID]).catch(() => undefined)
+    let project: Info | undefined
+    try {
+      project = await Storage.read<Info>(["project", projectID])
+    } catch (e) {
+      if (e instanceof Storage.NotFoundError) {
+        return []
+      }
+      throw e
+    }
+
     if (!project?.sandboxes) return []
     const valid: string[] = []
     for (const dir of project.sandboxes) {
