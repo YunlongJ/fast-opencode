@@ -36,6 +36,7 @@ import { ArgsProvider, useArgs, type Args } from "./context/args"
 import open from "open"
 import { writeHeapSnapshot } from "v8"
 import { PromptRefProvider, usePromptRef } from "./context/prompt"
+import { setupGlobalErrorHandlers, logErrorBoundary } from "./error-handler"
 
 async function getTerminalBackgroundColor(): Promise<"dark" | "light"> {
   // can't set raw mode if not a TTY
@@ -108,6 +109,9 @@ export function tui(input: {
   events?: EventSource
   onExit?: () => Promise<void>
 }) {
+  // 设置全局错误处理器
+  setupGlobalErrorHandlers()
+  
   // promise to prevent immediate exit
   return new Promise<void>(async (resolve) => {
     const mode = await getTerminalBackgroundColor()
@@ -120,7 +124,10 @@ export function tui(input: {
       () => {
         return (
           <ErrorBoundary
-            fallback={(error, reset) => <ErrorComponent error={error} reset={reset} onExit={onExit} mode={mode} />}
+            fallback={(error, reset) => {
+              logErrorBoundary(error)
+              return <ErrorComponent error={error} reset={reset} onExit={onExit} mode={mode} />
+            }}
           >
             <ArgsProvider {...input.args}>
               <ExitProvider onExit={onExit}>
