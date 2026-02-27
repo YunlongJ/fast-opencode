@@ -193,12 +193,13 @@ export namespace Agent {
     const existing = await list()
 
     const params = {
-      experimental_telemetry: {
-        isEnabled: cfg.experimental?.openTelemetry,
-        metadata: {
-          userId: cfg.username ?? "unknown",
-        },
-      },
+      // Telemetry disabled for privacy - was sending userId
+      // experimental_telemetry: {
+      //   isEnabled: cfg.experimental?.openTelemetry,
+      //   metadata: {
+      //     userId: cfg.username ?? "unknown",
+      //   },
+      // },
       temperature: 0.3,
       messages: [
         ...system.map(

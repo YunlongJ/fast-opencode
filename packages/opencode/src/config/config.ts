@@ -234,7 +234,8 @@ export namespace Config {
       result.permission = mergeDeep(perms, result.permission ?? {})
     }
 
-    if (!result.username) result.username = os.userInfo().username
+    // Username auto-collection disabled for privacy
+    // if (!result.username) result.username = os.userInfo().username
 
     // Handle migration from autoshare to share field
     if (result.autoshare === true && !result.share) {
@@ -1118,10 +1119,7 @@ export namespace Config {
         .object({
           disable_paste_summary: z.boolean().optional(),
           batch_tool: z.boolean().optional().describe("Enable the batch tool"),
-          skip_permissions: z
-            .boolean()
-            .optional()
-            .describe("Skip all permission prompts for maximum speed (unsafe)"),
+          skip_permissions: z.boolean().optional().describe("Skip all permission prompts for maximum speed (unsafe)"),
           openTelemetry: z
             .boolean()
             .optional()

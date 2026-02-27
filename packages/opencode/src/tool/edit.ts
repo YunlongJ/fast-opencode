@@ -24,6 +24,34 @@ export function normalizeLineEndings(text: string): string {
   return text.replaceAll("\r\n", "\n")
 }
 
+// 行号前缀检测正则
+const LINE_NUMBER_PATTERN = /^(\d+)[\t|]/
+
+/**
+ * 检测并去除行号前缀
+ */
+function detectAndStripLineNumbers(text: string): { hasLineNumber: boolean; cleanedString: string; detectedLineNumber?: number } {
+  const match = text.match(LINE_NUMBER_PATTERN)
+  if (match) {
+    return {
+      hasLineNumber: true,
+      cleanedString: text.replace(LINE_NUMBER_PATTERN, ""),
+      detectedLineNumber: parseInt(match[1], 10),
+    }
+  }
+  return { hasLineNumber: false, cleanedString: text }
+}
+
+/**
+ * 计算内容中精确匹配的次数
+ */
+function countExactOccurrences(content: string, searchString: string): number {
+  if (!searchString) return 0
+  const escaped = searchString.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  const regex = new RegExp(escaped, "g")
+  return (content.match(regex) || []).length
+}
+
 export const EditTool = Tool.define("edit", {
   description: DESCRIPTION,
   parameters: z.object({
@@ -46,7 +74,30 @@ export const EditTool = Tool.define("edit", {
       .optional()
       .describe("Restrict the search to a specific line range"),
     validateOnly: z.boolean().optional().describe("If true, only validate that oldString exists"),
+    expectedReplacements: z
+      .number()
+      .int()
+      .positive()
+      .default(1)
+      .describe("Expected number of occurrences to replace. Edit will fail if actual count differs. Use with replaceAll to replace all occurrences."),
   }),
+
+  /**
+   * 并发控制：声明此工具访问的资源
+   */
+  getResourceKeys(params) {
+    const filepath = path.isAbsolute(params.filePath)
+      ? params.filePath
+      : path.join(Instance.directory, params.filePath)
+    return new Set([`file:${filepath}:write`])
+  },
+
+  /**
+   * 并发控制：设置超时时间
+   */
+  getTimeout() {
+    return 30000 // 编辑操作最多 30 秒
+  },
   async execute(params, ctx) {
     if (!params.filePath) {
       throw new Error("filePath is required")
@@ -95,36 +146,149 @@ export const EditTool = Tool.define("edit", {
       await FileTime.assert(ctx.sessionID, filePath)
       contentOld = await file.text()
 
+      // 1. 检测并去除行号前缀
+      const lineCheck = detectAndStripLineNumbers(params.oldString)
+      if (lineCheck.hasLineNumber) {
+        const error: any = new Error(
+          `oldString appears to contain line number prefix (${lineCheck.detectedLineNumber}). ` +
+          `Remove the number and tab/| at the start.\n\n` +
+          `Did you mean:\n${lineCheck.cleanedString}`
+        )
+        error.metadata = {
+          type: "line_number_error",
+          suggestion: lineCheck.cleanedString,
+        }
+        throw error
+      }
+
+      // 2. 精确匹配计数校验
+      const expectedCount = params.replaceAll ? Infinity : params.expectedReplacements
+      const actualCount = countExactOccurrences(contentOld, params.oldString)
+
+      if (actualCount === 0) {
+        // 未找到匹配，尝试使用模糊匹配策略
+        let result: ReplaceResult
+        try {
+          result = replace(contentOld, params.oldString, params.newString, {
+            replaceAll: params.replaceAll,
+            matchStrategy: params.matchStrategy,
+            regexFlags: params.regexFlags,
+            anchorLines: params.anchorLines,
+            contextLines: params.contextLines,
+          })
+        } catch (e: any) {
+          if (e.metadata) {
+            ctx.metadata({ metadata: e.metadata })
+            if (e.metadata.type === "not_found") {
+              let msg = e.message
+              if (e.metadata.suggestions.length > 0) {
+                const s = e.metadata.suggestions[0]
+                msg += ` Did you mean line ${s.line}: "${s.content.trim()}"?`
+              }
+              throw new Error(msg)
+            }
+            if (e.metadata.type === "multiple_matches") {
+              const candidates = e.metadata.candidates
+                .map((c: any) => `Line ${c.line}: "${c.content.trim().substring(0, 50)}..."`)
+                .join("\n")
+              throw new Error(
+                `${e.message}\n${candidates}\n\nProvide more surrounding lines in oldString to identify the correct match.`,
+              )
+            }
+          }
+          throw e
+        }
+
+        contentNew = result.content
+        const editInfo = result
+
+        diff = trimDiff(
+          createTwoFilesPatch(filePath, filePath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew)),
+        )
+
+        if (params.validateOnly || params.dryRun) {
+          let message = params.validateOnly ? "Validation successful. oldString found." : "Dry run successful."
+          return {
+            metadata: {
+              diff,
+              editInfo,
+            },
+            output: `${message} Changes previewed in diff.\nUsed replacer: ${editInfo.replacer}`,
+          }
+        }
+
+        await ctx.ask({
+          permission: "edit",
+          patterns: [path.relative(Instance.worktree, filePath)],
+          always: ["*"],
+          metadata: {
+            filepath: filePath,
+            diff,
+            editInfo,
+          },
+        })
+
+        await file.write(contentNew)
+        await Bus.publish(File.Event.Edited, {
+          file: filePath,
+        })
+        await Bus.publish(FileWatcher.Event.Updated, {
+          file: filePath,
+          event: "change",
+        })
+        contentNew = await file.text()
+
+        // 索引修改后的文件内容到 MemoryContextEngine
+        try {
+          const { MemoryContextEngine } = await import("../session/engine/context");
+          const engine = MemoryContextEngine.getInstance();
+          await engine.init();
+          await engine.indexFile(filePath, contentNew);
+        } catch (e) {
+          // 索引失败不应阻断工具执行
+        }
+
+        diff = trimDiff(
+          createTwoFilesPatch(filePath, filePath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew)),
+        )
+        FileTime.read(ctx.sessionID, filePath)
+
+        let output = "Edit applied successfully."
+        if (params.replaceAll) {
+          output += ` (Replaced ${editInfo.matches} occurrences using ${editInfo.replacer})`
+        } else {
+          output += ` (Modified lines ${editInfo.startLine}-${editInfo.endLine} using ${editInfo.replacer})`
+        }
+        return output
+      }
+
+      // 3. 精确匹配成功，检查数量
+      if (!params.replaceAll && actualCount !== expectedCount) {
+        const error: any = new Error(
+          `Expected ${expectedCount} replacement(s) but found ${actualCount} occurrence(s).\n\n` +
+          `Options:\n` +
+          `1. Set expectedReplacements to ${actualCount} if you want to replace all occurrences\n` +
+          `2. Provide a more specific oldString to match only ${expectedCount} location(s)\n` +
+          `3. Use replaceAll: true to replace all ${actualCount} occurrences`
+        )
+        error.metadata = {
+          type: "count_mismatch",
+          actualCount,
+          expectedCount,
+        }
+        throw error
+      }
+
+      // 4. 执行精确替换
       let result: ReplaceResult
       try {
         result = replace(contentOld, params.oldString, params.newString, {
           replaceAll: params.replaceAll,
-          matchStrategy: params.matchStrategy,
-          regexFlags: params.regexFlags,
-          anchorLines: params.anchorLines,
-          contextLines: params.contextLines,
+          matchStrategy: "exact", // 强制使用精确匹配
         })
       } catch (e: any) {
-        if (e.metadata) {
-          ctx.metadata({ metadata: e.metadata })
-          if (e.metadata.type === "not_found") {
-            let msg = e.message
-            if (e.metadata.suggestions.length > 0) {
-              const s = e.metadata.suggestions[0]
-              msg += ` Did you mean line ${s.line}: "${s.content.trim()}"?`
-            }
-            throw new Error(msg)
-          }
-          if (e.metadata.type === "multiple_matches") {
-            const candidates = e.metadata.candidates
-              .map((c: any) => `Line ${c.line}: "${c.content.trim().substring(0, 50)}..."`)
-              .join("\n")
-            throw new Error(
-              `${e.message}\n${candidates}\n\nProvide more surrounding lines in oldString to identify the correct match.`,
-            )
-          }
-        }
-        throw e
+        // 精确替换不应该失败，因为已经校验过计数
+        throw new Error(`Unexpected error during exact replacement: ${e.message}`)
       }
 
       contentNew = result.content
@@ -141,7 +305,7 @@ export const EditTool = Tool.define("edit", {
             diff,
             editInfo,
           },
-          output: `${message} Changes previewed in diff.\nUsed replacer: ${editInfo.replacer}`,
+          output: `${message} Changes previewed in diff.\nUsed replacer: exact`,
         }
       }
 
@@ -183,9 +347,9 @@ export const EditTool = Tool.define("edit", {
 
       let output = "Edit applied successfully."
       if (params.replaceAll) {
-        output += ` (Replaced ${editInfo.matches} occurrences using ${editInfo.replacer})`
+        output += ` (Replaced all ${actualCount} occurrences using exact match)`
       } else {
-        output += ` (Modified lines ${editInfo.startLine}-${editInfo.endLine} using ${editInfo.replacer})`
+        output += ` (Modified lines ${editInfo.startLine}-${editInfo.endLine} using exact match)`
       }
       return output
     })

@@ -29,6 +29,12 @@
 - **Intelligent Error Recovery**: Context-aware suggestions when edits fail (e.g., "Did you mean line X?")
 - **Tool Result Caching**: Automatic caching of read operations to avoid redundant executions
 
+#### 🛡️ Edit Tool Safety Features (New)
+- **Expected Replacements**: Validates exact match count before editing (prevents accidental multi-replace)
+- **Line Number Detection**: Auto-detects and rejects line number prefixes from Read tool output
+- **Structured Error Feedback**: Detailed error types (`count_mismatch`, `line_number`, `not_found`) with actionable suggestions
+- **Concurrent Edit Protection**: Resource locking prevents race conditions during parallel tool execution
+
 ### ⚡ Performance Optimizations
 - **Async Lazy Loading**: Heavy components (Tree-Sitter parsers) load on-demand for faster startup
 - **Storage Write Batching**: Aggregated state updates reduce I/O overhead
@@ -99,6 +105,24 @@ Add to your `~/.opencode/config.json`:
 ## 🤝 Contributing
 
 This fork focuses on performance and tool enhancements. Contributions welcome!
+
+---
+
+## 📝 Recent Updates
+
+### 2025-02-27: Edit Tool Safety Enhancement
+- **Added** `expectedReplacements` parameter for precise edit control
+- **Added** automatic line number prefix detection and removal
+- **Added** structured error types with actionable suggestions
+- **Added** concurrent edit protection via resource locking
+- **Improved** error messages with specific guidance for recovery
+
+### 2025-02-27: Read Tool Performance Optimization
+- **Added** intelligent file content caching (LRU with mtime validation)
+- **Added** fast binary file detection via extension whitelist
+- **Added** concurrent execution metadata (`getResourceKeys`, `getTimeout`)
+- **Improved** streaming read performance for large files
+- **Improved** tool description for better LLM guidance
 
 ---
 

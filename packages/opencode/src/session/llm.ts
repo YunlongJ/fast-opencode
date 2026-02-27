@@ -55,10 +55,13 @@ export namespace LLM {
       .tag("small", (input.small ?? false).toString())
       .tag("agent", input.agent.name)
       .tag("mode", input.agent.mode)
-    l.info({
-      modelID: input.model.id,
-      providerID: input.model.providerID,
-    }, "stream")
+    l.info(
+      {
+        modelID: input.model.id,
+        providerID: input.model.providerID,
+      },
+      "stream",
+    )
 
     const cfgPromise = input.config ? Promise.resolve(input.config) : Config.get()
     const [language, cfg] = await Promise.all([Provider.getLanguage(input.model), cfgPromise])
@@ -266,13 +269,14 @@ export namespace LLM {
           },
         ],
       }),
-      experimental_telemetry: {
-        isEnabled: cfg.experimental?.openTelemetry,
-        metadata: {
-          userId: cfg.username ?? "unknown",
-          sessionId: input.sessionID,
-        },
-      },
+      // Telemetry disabled for privacy - was sending userId and sessionId
+      // experimental_telemetry: {
+      //   isEnabled: cfg.experimental?.openTelemetry,
+      //   metadata: {
+      //     userId: cfg.username ?? "unknown",
+      //     sessionId: input.sessionID,
+      //   },
+      // },
     })
   }
 
@@ -306,7 +310,8 @@ export namespace LLM {
   }
 
   export async function generate(input: GenerateInput) {
-    const model = "id" in input.model ? input.model : await Provider.getModel(input.model.providerID, input.model.modelID)
+    const model =
+      "id" in input.model ? input.model : await Provider.getModel(input.model.providerID, input.model.modelID)
 
     const language = await Provider.getLanguage(model)
 

@@ -324,10 +324,11 @@ export namespace Provider {
       return {
         autoload: false,
         options: {
-          headers: {
-            "HTTP-Referer": "https://opencode.ai/",
-            "X-Title": "opencode",
-          },
+          // Headers disabled for privacy
+          // headers: {
+          //   "HTTP-Referer": "https://opencode.ai/",
+          //   "X-Title": "opencode",
+          // },
         },
       }
     },
@@ -335,10 +336,11 @@ export namespace Provider {
       return {
         autoload: false,
         options: {
-          headers: {
-            "http-referer": "https://opencode.ai/",
-            "x-title": "opencode",
-          },
+          // Headers disabled for privacy
+          // headers: {
+          //   "http-referer": "https://opencode.ai/",
+          //   "x-title": "opencode",
+          // },
         },
       }
     },
@@ -404,10 +406,11 @@ export namespace Provider {
       return {
         autoload: false,
         options: {
-          headers: {
-            "HTTP-Referer": "https://opencode.ai/",
-            "X-Title": "opencode",
-          },
+          // Headers disabled for privacy
+          // headers: {
+          //   "HTTP-Referer": "https://opencode.ai/",
+          //   "X-Title": "opencode",
+          // },
         },
       }
     },
@@ -472,8 +475,9 @@ export namespace Provider {
             // Cloudflare AI Gateway uses cf-aig-authorization for authenticated gateways
             // This enables Unified Billing where Cloudflare handles upstream provider auth
             ...(apiToken ? { "cf-aig-authorization": `Bearer ${apiToken}` } : {}),
-            "HTTP-Referer": "https://opencode.ai/",
-            "X-Title": "opencode",
+            // Headers disabled for privacy
+            // "HTTP-Referer": "https://opencode.ai/",
+            // "X-Title": "opencode",
           },
           // Custom fetch to handle parameter transformation and auth
           fetch: async (input: RequestInfo | URL, init?: RequestInit) => {

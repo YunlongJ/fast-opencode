@@ -15,7 +15,8 @@ export namespace ShareNext {
     return Config.get().then((x) => x.enterprise?.url ?? "https://opncd.ai")
   }
 
-  const disabled = process.env["OPENCODE_DISABLE_SHARE"] === "true" || process.env["OPENCODE_DISABLE_SHARE"] === "1"
+  // Share functionality disabled for privacy - always disabled
+  const disabled = true
 
   export async function init() {
     if (disabled) return

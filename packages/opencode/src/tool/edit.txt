@@ -1,10 +1,52 @@
-Performs exact string replacements in files. 
+Performs precise string replacements in files with safety checks and intelligent error recovery.
 
-Usage:
-- You must use your `Read` tool at least once in the conversation before editing. This tool will error if you attempt an edit without reading the file. 
-- When editing text from Read tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: spaces + line number + tab. Everything after that tab is the actual file content to match. Never include any part of the line number prefix in the oldString or newString.
-- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.
-- Only use emojis if the user explicitly requests it. Avoid adding emojis to files unless asked.
-- The edit will FAIL if `oldString` is not found in the file with an error "oldString not found in content".
-- The edit will FAIL if `oldString` is found multiple times in the file with an error "oldString found multiple times and requires more code context to uniquely identify the intended match". Either provide a larger string with more surrounding context to make it unique or use `replaceAll` to change every instance of `oldString`. 
-- Use `replaceAll` for replacing and renaming strings across the file. This parameter is useful if you want to rename a variable for instance.
+CRITICAL SAFETY FEATURES:
+1. READ BEFORE EDIT: You must use the `Read` tool before editing. The tool tracks file state and will reject edits to unread files.
+2. EXPECTED REPLACEMENTS: By default, the tool expects to find exactly 1 occurrence of oldString. If found count differs, edit fails with detailed guidance.
+3. LINE NUMBER DETECTION: Automatically detects and rejects oldString containing line number prefixes (e.g., "123|content" or "123\tcontent").
+
+USAGE GUIDELINES:
+
+Basic Edit (single occurrence):
+- Provide exact oldString and newString
+- Tool verifies exactly 1 match exists before editing
+- If multiple matches found, you must either:
+  a) Provide more specific oldString with additional context
+  b) Set expectedReplacements to the actual count
+  c) Use replaceAll: true to replace all occurrences
+
+Multiple Replacements:
+- Use replaceAll: true to replace ALL occurrences of oldString
+- Or set expectedReplacements to the exact count you want to replace
+
+Line Number Handling:
+- When copying from Read tool output, NEVER include the line number prefix
+- Correct: "console.log('hello')"
+- Wrong: "123|console.log('hello')" or "123\tconsole.log('hello')"
+
+Matching Strategies (fallback order):
+1. exact: Character-for-character match (default, fastest)
+2. fuzzy: Ignores whitespace variations, indentation differences
+3. block: Matches code blocks using start/end anchors
+4. regex: Uses regular expression matching
+
+Error Recovery:
+If edit fails, tool provides:
+- Specific error type (not_found, multiple_matches, count_mismatch, line_number)
+- Suggested corrections
+- Actual vs expected occurrence counts
+- Similar line suggestions for not_found errors
+
+EXAMPLES:
+
+Simple replacement:
+{ "filePath": "/project/src/app.ts", "oldString": "console.log('hello')", "newString": "logger.info('hello')" }
+
+Replace all occurrences:
+{ "filePath": "/project/src/app.ts", "oldString": "console.log", "newString": "logger.info", "replaceAll": true }
+
+Expected multiple matches:
+{ "filePath": "/project/src/app.ts", "oldString": "user", "newString": "userData", "expectedReplacements": 3 }
+
+Dry run (preview only):
+{ "filePath": "/project/src/app.ts", "oldString": "foo", "newString": "bar", "dryRun": true }
