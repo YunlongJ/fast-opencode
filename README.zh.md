@@ -1,162 +1,106 @@
+# OpenCode Enhanced
+
 <p align="center">
-  <a href="https://opencode.ai">
-    <picture>
-      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
-      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
-    </picture>
-  </a>
-</p>
-<p align="center">开源的 AI Coding Agent。</p>
-<p align="center">
-  <a href="https://opencode.ai/discord"><img alt="Discord" src="https://img.shields.io/discord/1391832426048651334?style=flat-square&label=discord" /></a>
-  <a href="https://www.npmjs.com/package/opencode-ai"><img alt="npm" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square" /></a>
-  <a href="https://github.com/anomalyco/opencode/actions/workflows/publish.yml"><img alt="Build status" src="https://img.shields.io/github/actions/workflow/status/anomalyco/opencode/publish.yml?style=flat-square&branch=dev" /></a>
+  <strong>支持工具并行执行的 AI 编程助手</strong>
 </p>
 
 <p align="center">
   <a href="README.md">English</a> |
-  <a href="README.zh.md">简体中文</a> |
-  <a href="README.zht.md">繁體中文</a> |
-  <a href="README.ko.md">한국어</a> |
-  <a href="README.de.md">Deutsch</a> |
-  <a href="README.es.md">Español</a> |
-  <a href="README.fr.md">Français</a> |
-  <a href="README.it.md">Italiano</a> |
-  <a href="README.da.md">Dansk</a> |
-  <a href="README.ja.md">日本語</a> |
-  <a href="README.pl.md">Polski</a> |
-  <a href="README.ru.md">Русский</a> |
-  <a href="README.ar.md">العربية</a> |
-  <a href="README.no.md">Norsk</a> |
-  <a href="README.br.md">Português (Brasil)</a> |
-  <a href="README.th.md">ไทย</a> |
-  <a href="README.tr.md">Türkçe</a>
+  <a href="README.zh.md">简体中文</a>
 </p>
 
 ---
 
-> [!IMPORTANT]
-> 本项目是原 [OpenCode](https://github.com/anomalyco/opencode) 的 **fork** 版本。
-> 它包含针对 AI Agent 核心的多项性能增强和架构改进。
+> [!NOTE]
+> 本项目是 [OpenCode](https://github.com/anomalyco/opencode) 的增强分支，包含显著的性能提升和架构改进。
 
-### 主要更新与增强
+## ✨ 核心增强
 
-- **🚀 工具并行执行**: 引入了精细的资源锁管理器，支持共享/排他锁。多个只读操作（如 `read`、`grep`）现在可以并行运行，显著缩短了 Agent 的等待时间。
-- **🔗 依赖感知调度**: 增加了对工具依赖关系的智能分析，优化了执行流程并确保了数据一致性。
-- **⚡ 异步性能优化**: 重构了核心处理循环，并为重型组件（如 Tree-Sitter 解析器）引入了异步延迟加载，实现了更快的启动和更流畅的运行。
-- **🏗️ 工作队列与后台任务**: 增强了内部工作队列系统，使后台任务管理更加健壮。
-- **🧠 AI 原生逻辑流**: 优化了 Agent 的决策逻辑，使其更高效且更适合处理复杂的多步编码任务。
+### 🚀 并行工具执行引擎
+- **资源锁管理器**: 精细化的共享/排他锁系统，确保并发操作安全
+- **依赖感知调度**: 智能分析工具依赖关系，在保证数据一致性的前提下最大化并行度
+- **自适应并发**: 根据执行时长和错误率动态调整并行工具数量
+- **读操作并行化**: 多个只读工具（`read`、`grep`、`list`、`glob`）同时执行，显著减少等待时间
 
-### 最近更新 (v0.2.x)
+### 🔧 工具增强
+- **精准代码导航**: 直接跳转到符号、函数、类或指定行号，支持 1-based 索引
+- **智能代码编辑**: 多种匹配策略（`exact`精确、`fuzzy`模糊、`block`块匹配、`regex`正则）配合 `anchorLines` 范围限制
+- **安全编辑模式**: `dryRun` 和 `validateOnly` 选项，实现无风险代码修改
+- **智能错误恢复**: 编辑失败时提供上下文感知建议（如"您是否指第 X 行？"）
+- **工具结果缓存**: 自动缓存读取操作，避免重复执行
 
-- **🔍 精准代码读取 (Read Tool)**: 引入了全新的导航与定位功能。支持通过 `symbol` 直接定位函数、类或行号，提供 1-based 行号支持和文件结构预览（Preview 模式），极大提升了 AI 获取代码上下文的效率。
-- **📝 增强型代码编辑 (Edit/MultiEdit)**:
-  - **多种匹配策略**: 支持 `exact`（精确）、`fuzzy`（模糊）、`block`（块匹配）和 `regex`（正则）匹配，大幅提高复杂代码修改的成功率。
-  - **范围限制与验证**: 引入 `anchorLines` 限制修改范围，并增加 `dryRun` 和 `validateOnly` 模式，确保修改的安全性和准确性。
-  - **智能错误反馈**: 当匹配失败时，工具会提供智能建议（如“您是否是指第 X 行？”），帮助 Agent 快速自我纠错。
-- **⚙️ 健壮的任务调度 (Work Queue)**:
-  - **任务标识优化**: 改进了任务 ID 生成算法（基于 Hash），避免了在大规模任务流中的 ID 碰撞。
-  - **状态管理增强**: 引入了更细致的任务失败处理逻辑 (`isFailed`)，提升了并行执行时的可靠性。
-- **💎 代码质量与标准**: 全面遵循严格的编码规范，并在核心组件中增加了详细的文档注释和线程安全说明 (`@VertxThreadSafety`)。
+### ⚡ 性能优化
+- **异步延迟加载**: 重型组件（Tree-Sitter 解析器）按需加载，启动更快
+- **存储写入批处理**: 聚合状态更新，降低 I/O 开销
+- **优化处理循环**: 重构核心引擎，执行流程更流畅
+- **工作队列集成**: 健壮的背景任务管理，支持优先级调度
 
----
-
-[![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
-
----
-
-### 安装
-
-```bash
-# 直接安装 (YOLO)
-curl -fsSL https://opencode.ai/install | bash
-
-# 软件包管理器
-npm i -g opencode-ai@latest        # 也可使用 bun/pnpm/yarn
-scoop install opencode             # Windows
-choco install opencode             # Windows
-brew install anomalyco/tap/opencode # macOS 和 Linux（推荐，始终保持最新）
-brew install opencode              # macOS 和 Linux（官方 brew formula，更新频率较低）
-paru -S opencode-bin               # Arch Linux
-mise use -g opencode               # 任意系统
-nix run nixpkgs#opencode           # 或用 github:anomalyco/opencode 获取最新 dev 分支
-```
-
-> [!TIP]
-> 安装前请先移除 0.1.x 之前的旧版本。
-
-### 桌面应用程序 (BETA)
-
-OpenCode 也提供桌面版应用。可直接从 [发布页 (releases page)](https://github.com/anomalyco/opencode/releases) 或 [opencode.ai/download](https://opencode.ai/download) 下载。
-
-| 平台                  | 下载文件                              |
-| --------------------- | ------------------------------------- |
-| macOS (Apple Silicon) | `opencode-desktop-darwin-aarch64.dmg` |
-| macOS (Intel)         | `opencode-desktop-darwin-x64.dmg`     |
-| Windows               | `opencode-desktop-windows-x64.exe`    |
-| Linux                 | `.deb`、`.rpm` 或 AppImage            |
-
-```bash
-# macOS (Homebrew Cask)
-brew install --cask opencode-desktop
-# Windows (Scoop)
-scoop bucket add extras; scoop install extras/opencode-desktop
-```
-
-#### 安装目录
-
-安装脚本按照以下优先级决定安装路径：
-
-1. `$OPENCODE_INSTALL_DIR` - 自定义安装目录
-2. `$XDG_BIN_DIR` - 符合 XDG 基础目录规范的路径
-3. `$HOME/bin` - 如果存在或可创建的用户二进制目录
-4. `$HOME/.opencode/bin` - 默认备用路径
-
-```bash
-# 示例
-OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bash
-XDG_BIN_DIR=$HOME/.local/bin curl -fsSL https://opencode.ai/install | bash
-```
-
-### Agents
-
-OpenCode 内置两种 Agent，可用 `Tab` 键快速切换：
-
-- **build** - 默认模式，具备完整权限，适合开发工作
-- **plan** - 只读模式，适合代码分析与探索
-  - 默认拒绝修改文件
-  - 运行 bash 命令前会询问
-  - 便于探索未知代码库或规划改动
-
-另外还包含一个 **general** 子 Agent，用于复杂搜索和多步任务，内部使用，也可在消息中输入 `@general` 调用。
-
-了解更多 [Agents](https://opencode.ai/docs/agents) 相关信息。
-
-### 文档
-
-更多配置说明请查看我们的 [**官方文档**](https://opencode.ai/docs)。
-
-### 参与贡献
-
-如有兴趣贡献代码，请在提交 PR 前阅读 [贡献指南 (Contributing Docs)](./CONTRIBUTING.md)。
-
-### 基于 OpenCode 进行开发
-
-如果你在项目名中使用了 “opencode”（如 “opencode-dashboard” 或 “opencode-mobile”），请在 README 里注明该项目不是 OpenCode 团队官方开发，且不存在隶属关系。
-
-### 常见问题 (FAQ)
-
-#### 这和 Claude Code 有什么不同？
-
-功能上很相似，关键差异：
-
-- 100% 开源。
-- 不绑定特定提供商。推荐使用 [OpenCode Zen](https://opencode.ai/zen) 的模型，但也可搭配 Claude、OpenAI、Google 甚至本地模型。模型迭代会缩小差异、降低成本，因此保持 provider-agnostic 很重要。
-- 内置 LSP 支持。
-- 聚焦终端界面 (TUI)。OpenCode 由 Neovim 爱好者和 [terminal.shop](https://terminal.shop) 的创建者打造，会持续探索终端的极限。
-- 客户端/服务器架构。可在本机运行，同时用移动设备远程驱动。TUI 只是众多潜在客户端之一。
+### 🎨 UI 改进
+- 精简的终端界面，响应更迅速
+- 并行操作的增强进度指示器
+- 改进的错误可视化和调试输出
 
 ---
 
-**加入我们的社区** [Discord](https://discord.gg/opencode) | [X.com](https://x.com/opencode)
+## 📦 安装
+
+```bash
+# 克隆并安装
+git clone <你的仓库地址>
+cd opencode
+bun install
+
+# 构建
+bun run build
+
+# 运行
+cd packages/opencode
+bun run start
+```
+
+---
+
+## ⚙️ 配置
+
+在 `~/.opencode/config.json` 中添加：
+
+```json
+{
+  "experimental": {
+    "parallel_execution": true,
+    "max_parallel_tools": 16
+  }
+}
+```
+
+---
+
+## 🏗️ 架构亮点
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    工具编排器 (Tool Orchestrator)            │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐ │
+│  │   依赖图     │  │   资源锁    │  │    自适应限流器      │ │
+│  │  Dependency │  │   Resource  │  │  (动态并发控制)       │ │
+│  │    Graph    │  │    Locks    │  │  Adaptive Limiter   │ │
+│  └─────────────┘  └─────────────┘  └─────────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
+                              │
+        ┌─────────────────────┼─────────────────────┐
+        ▼                     ▼                     ▼
+   ┌─────────┐          ┌─────────┐          ┌─────────┐
+   │  read   │          │  grep   │          │  bash   │
+   │ (并行)   │          │ (并行)   │          │ (串行)   │
+   └─────────┘          └─────────┘          └─────────┘
+```
+
+---
+
+## 🤝 参与贡献
+
+本分支专注于性能和工具增强。欢迎贡献代码！
+
+---
+
+**原项目**: [OpenCode](https://github.com/anomalyco/opencode) | **许可证**: MIT
